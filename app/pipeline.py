@@ -12,7 +12,12 @@ from tqdm import tqdm
 from app.clustering import cluster_embeddings
 from app.db import Database
 from app.models import FaceDetector, FaceEmbedder
-from app.scanner import load_image_rgb, scan_image_paths
+from app.scanner import (
+    extract_video_keyframes,
+    is_video_file,
+    load_image_rgb,
+    scan_media_paths,
+)
 
 
 def run_pipeline(
@@ -23,18 +28,21 @@ def run_pipeline(
     min_samples: int = 1,
     clustering_algorithm: str = "dbscan",
     export_dir: Optional[Path | str] = None,
+    scene_threshold: float = 0.35,
+    min_interval_sec: float = 0.5,
+    max_interval_sec: float = 3.0,
     progress_callback: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     """
-    Run the complete face scanning, detection, embedding, and clustering pipeline.
+    Run the complete face scanning, detection, embedding, and clustering pipeline for images and videos.
 
     Returns:
         Summary dictionary containing images scanned, faces detected, clusters, and breakdown.
     """
     db = Database(db_path)
-    image_paths = scan_image_paths(input_dir)
+    media_paths = scan_media_paths(input_dir)
 
-    if not image_paths:
+    if not media_paths:
         return {
             "images_scanned": 0,
             "faces_detected": 0,
@@ -51,33 +59,67 @@ def run_pipeline(
     all_embeddings: List[np.ndarray] = []
     all_face_records: List[Dict[str, Any]] = []
 
-    # Process images with progress bar
-    for path in tqdm(image_paths, desc="Scanning & detecting faces"):
-        img_rgb = load_image_rgb(path)
-        if img_rgb is None:
-            continue
+    # Process media files with progress bar
+    for path in tqdm(media_paths, desc="Scanning & detecting faces"):
+        if is_video_file(path):
+            # Process video keyframes
+            for kf in extract_video_keyframes(
+                path,
+                scene_threshold=scene_threshold,
+                min_interval_sec=min_interval_sec,
+                max_interval_sec=max_interval_sec,
+            ):
+                source_id = f"{path}#t={kf.timestamp_sec:.2f}s"
+                image_id = db.insert_image(source_id)
+                detected_faces = detector.detect(kf.frame_rgb)
 
-        image_id = db.insert_image(str(path))
-        detected_faces = detector.detect(img_rgb)
+                for idx, face in enumerate(detected_faces):
+                    emb = embedder.extract_embedding(kf.frame_rgb, face.raw_face)
+                    face_id = db.insert_face(
+                        image_id=image_id,
+                        bbox=face.bbox,
+                        confidence=face.confidence,
+                        embedding=emb,
+                        cluster_id=-1,
+                    )
+                    all_face_ids.append(face_id)
+                    all_embeddings.append(emb)
+                    all_face_records.append({
+                        "face_id": face_id,
+                        "path": path,
+                        "face_idx": idx,
+                        "label_suffix": f"t{kf.timestamp_sec:.2f}s",
+                        "bbox": face.bbox,
+                        "img_rgb": kf.frame_rgb,
+                    })
+        else:
+            # Process standard image
+            img_rgb = load_image_rgb(path)
+            if img_rgb is None:
+                continue
 
-        for idx, face in enumerate(detected_faces):
-            emb = embedder.extract_embedding(img_rgb, face.raw_face)
-            face_id = db.insert_face(
-                image_id=image_id,
-                bbox=face.bbox,
-                confidence=face.confidence,
-                embedding=emb,
-                cluster_id=-1,
-            )
-            all_face_ids.append(face_id)
-            all_embeddings.append(emb)
-            all_face_records.append({
-                "face_id": face_id,
-                "path": path,
-                "face_idx": idx,
-                "bbox": face.bbox,
-                "img_rgb": img_rgb,
-            })
+            image_id = db.insert_image(str(path))
+            detected_faces = detector.detect(img_rgb)
+
+            for idx, face in enumerate(detected_faces):
+                emb = embedder.extract_embedding(img_rgb, face.raw_face)
+                face_id = db.insert_face(
+                    image_id=image_id,
+                    bbox=face.bbox,
+                    confidence=face.confidence,
+                    embedding=emb,
+                    cluster_id=-1,
+                )
+                all_face_ids.append(face_id)
+                all_embeddings.append(emb)
+                all_face_records.append({
+                    "face_id": face_id,
+                    "path": path,
+                    "face_idx": idx,
+                    "label_suffix": "",
+                    "bbox": face.bbox,
+                    "img_rgb": img_rgb,
+                })
 
     # Perform clustering if any faces detected
     if all_face_ids and all_embeddings:
@@ -118,7 +160,8 @@ def run_pipeline(
                 crop_rgb = img_rgb[cy1:cy2, cx1:cx2]
                 crop_bgr = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2BGR)
 
-                out_name = f"{record['path'].stem}_face{record['face_idx']}.jpg"
+                suffix = f"_{record['label_suffix']}" if record.get("label_suffix") else ""
+                out_name = f"{record['path'].stem}{suffix}_face{record['face_idx']}.jpg"
                 cv2.imwrite(str(dest_dir / out_name), crop_bgr)
 
     return db.get_summary_stats()

@@ -86,6 +86,9 @@ def main(args: list[str] | None = None) -> int:
     scan_parser.add_argument("--conf", type=float, default=0.5, help="Face detection confidence threshold (default: 0.5)")
     scan_parser.add_argument("--algo", type=str, default="dbscan", choices=["dbscan", "agglomerative"], help="Clustering algorithm")
     scan_parser.add_argument("--export", type=str, default=None, help="Directory to export cropped face cutouts grouped by person")
+    scan_parser.add_argument("--scene-thresh", type=float, default=0.35, help="Video scene cut threshold (0.0 - 1.0, default: 0.35)")
+    scan_parser.add_argument("--min-interval", type=float, default=0.5, help="Minimum seconds between video keyframes (default: 0.5)")
+    scan_parser.add_argument("--max-interval", type=float, default=3.0, help="Maximum seconds between video keyframe samples (default: 3.0)")
 
     # Inspect subcommand
     inspect_parser = subparsers.add_parser("inspect", help="Inspect a specific person/cluster")
@@ -111,6 +114,9 @@ def main(args: list[str] | None = None) -> int:
             eps=parsed.threshold,
             clustering_algorithm=parsed.algo,
             export_dir=parsed.export,
+            scene_threshold=parsed.scene_thresh,
+            min_interval_sec=parsed.min_interval,
+            max_interval_sec=parsed.max_interval,
         )
         print_summary(stats)
         return 0
