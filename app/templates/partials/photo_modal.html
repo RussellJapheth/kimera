@@ -1,0 +1,270 @@
+<div class="modal-content" @click.stop x-init="setNeighbors({{ prev_id if prev_id else 'null' }}, {{ next_id if next_id else 'null' }})">
+  <!-- Full Media Display (Photo or Video) -->
+  <div class="modal-media-view">
+    <!-- Prev Nav Button -->
+    {% if prev_id %}
+      <button 
+        class="modal-nav-btn prev-btn" 
+        @click.stop="openModal({{ prev_id }})" 
+        title="Previous (Left Arrow / Swipe Right)"
+        aria-label="Previous item"
+      >
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <path d="m15 18-6-6 6-6"/>
+        </svg>
+      </button>
+    {% endif %}
+
+    {% if image.is_video %}
+      <div 
+        class="modal-video-wrapper" 
+        x-data="{
+          mode: 'raw',
+          hasError: false,
+          isLoading: false,
+          switchMode(newMode) {
+            this.mode = newMode;
+            this.hasError = false;
+            this.isLoading = true;
+            const v = this.$refs.videoPlayer;
+            if (v) {
+              v.pause();
+              v.src = (newMode === 'stream') ? '/api/photos/{{ image.id }}/stream' : '/api/photos/{{ image.id }}/raw';
+              v.load();
+              v.play().catch(() => {});
+            }
+          },
+          handleError() {
+            this.isLoading = false;
+            this.hasError = true;
+          },
+          handleLoaded() {
+            this.isLoading = false;
+            this.hasError = false;
+          }
+        }"
+      >
+        <!-- Stream Mode Toggle Bar (Only visible for videos) -->
+        <div class="video-mode-bar">
+          <div class="video-mode-toggle" role="tablist">
+            <button 
+              type="button"
+              class="video-mode-btn" 
+              :class="{ 'active': mode === 'raw' }"
+              @click.stop="switchMode('raw')"
+              title="Play original video file directly"
+            >
+              Direct (Original)
+            </button>
+            <button 
+              type="button"
+              class="video-mode-btn" 
+              :class="{ 'active': mode === 'stream' }"
+              @click.stop="switchMode('stream')"
+              title="Play browser-compatible web stream"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="margin-right: 4px; vertical-align: -1px;">
+                <polygon points="5 3 19 12 5 21 5 3"></polygon>
+              </svg>
+              Web Stream
+            </button>
+          </div>
+        </div>
+
+        <video 
+          x-ref="videoPlayer"
+          controls 
+          autoplay 
+          playsinline 
+          class="modal-video-player"
+          controlsList="nodownload"
+          @error="handleError()"
+          @loadeddata="handleLoaded()"
+          @canplay="handleLoaded()"
+          @waiting="isLoading = true"
+          @playing="isLoading = false"
+          src="/api/photos/{{ image.id }}/raw"
+        >
+          Your browser does not support video playback.
+        </video>
+
+        <!-- Loading spinner overlay -->
+        <div class="video-loading-overlay" x-show="isLoading" x-cloak>
+          <div class="spinner"></div>
+          <span style="font-size: 0.8125rem; color: #fff; margin-top: 0.5rem; text-shadow: 0 1px 2px rgba(0,0,0,0.8);" x-text="mode === 'stream' ? 'Preparing web stream...' : 'Loading video...'"></span>
+        </div>
+
+        <!-- Codec Incompatibility Error Overlay -->
+        <div class="video-error-overlay" x-show="hasError" x-cloak>
+          <div class="video-error-card">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="2" style="margin-bottom: 0.5rem;">
+              <circle cx="12" cy="12" r="10"></circle>
+              <line x1="12" y1="8" x2="12" y2="12"></line>
+              <line x1="12" y1="16" x2="12.01" y2="16"></line>
+            </svg>
+            <div style="font-weight: 600; font-size: 0.95rem; margin-bottom: 0.25rem; color: #fff;">Codec / Format Unsupported</div>
+            <p style="font-size: 0.8125rem; color: var(--text-muted); margin-bottom: 0.85rem; max-width: 280px; text-align: center; line-height: 1.4;">
+              Your browser cannot play this video codec directly. Switch to Web Stream to play it.
+            </p>
+            <div style="display: flex; gap: 0.5rem; align-items: center;">
+              <button 
+                type="button"
+                class="btn btn-primary" 
+                style="padding: 0.4rem 0.85rem; font-size: 0.8125rem;"
+                @click.stop="switchMode('stream')"
+                x-show="mode !== 'stream'"
+              >
+                Switch to Web Stream
+              </button>
+              <a 
+                href="/api/photos/{{ image.id }}/raw" 
+                download="{{ image.filename }}" 
+                class="btn" 
+                style="padding: 0.4rem 0.85rem; font-size: 0.8125rem; text-decoration: none;"
+                @click.stop
+              >
+                Download Original
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>
+    {% else %}
+      <img src="/api/photos/{{ image.id }}/raw" alt="{{ image.filename }}" loading="eager" class="modal-main-img">
+    {% endif %}
+
+    <!-- Next Nav Button -->
+    {% if next_id %}
+      <button 
+        class="modal-nav-btn next-btn" 
+        @click.stop="openModal({{ next_id }})" 
+        title="Next (Right Arrow / Swipe Left)"
+        aria-label="Next item"
+      >
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <path d="m9 18 6-6-6-6"/>
+        </svg>
+      </button>
+    {% endif %}
+
+    {% if total_count and total_count > 1 %}
+      <div class="modal-counter-badge">
+        {{ current_index }} / {{ total_count }}
+      </div>
+    {% endif %}
+  </div>
+
+  <!-- Sidebar -->
+  <div class="modal-sidebar">
+    <div>
+      <div class="modal-sidebar-header">
+        <div style="font-weight: 600; font-size: 1rem; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{ image.filename }}">
+          {{ image.filename }}
+        </div>
+        <div style="display: flex; align-items: center; gap: 0.5rem;">
+          <button 
+            class="fav-btn {% if image.is_favorite %}active{% endif %}"
+            hx-post="/api/photos/{{ image.id }}/favorite"
+            hx-target="#modal-fav-btn"
+            hx-swap="outerHTML"
+            id="modal-fav-btn"
+            title="Toggle favorite"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="{% if image.is_favorite %}currentColor{% else %}none{% endif %}" stroke="currentColor" stroke-width="2">
+              <path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/>
+            </svg>
+          </button>
+          
+          <button class="modal-close" @click="closeModal()" title="Close viewer">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"/>
+              <line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Metadata Section -->
+      <div style="font-size: 0.8125rem; color: var(--text-muted); margin-bottom: 1.25rem;">
+        {% if image.is_video %}
+          <div style="margin-bottom: 0.3rem;"><span class="badge" style="background: rgba(99, 102, 241, 0.2); color: #a5b4fc; font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 9999px;">Video File</span></div>
+        {% endif %}
+        {% if image.width and image.height %}
+          <div style="margin-bottom: 0.3rem;"><strong>Dimensions:</strong> {{ image.width }} × {{ image.height }} px</div>
+        {% endif %}
+        <div style="margin-bottom: 0.3rem; word-break: break-all;"><strong>File Path:</strong> {{ image.file_path }}</div>
+        <div><strong>Scanned:</strong> {{ image.scanned_at }}</div>
+      </div>
+
+      <!-- Recognized Faces Section (Named faces prioritized on top) -->
+      <div style="border-top: 1px solid var(--border-subtle); padding-top: 1rem;">
+        <div style="font-weight: 600; font-size: 0.875rem; color: var(--text-main); margin-bottom: 0.5rem; display: flex; align-items: center; justify-content: space-between;">
+          <span>Detected People & Faces</span>
+          <span style="font-size: 0.75rem; color: var(--text-dim);">{{ image.faces|length }}</span>
+        </div>
+
+        {% if image.faces and image.faces|length > 0 %}
+          <div class="face-tag-list">
+            {% for face in image.faces %}
+              {% set face_url = ('/person/' ~ face.person_id) if face.person_id else (('/?cluster_id=' ~ face.cluster_id) if face.cluster_id >= 0 else '') %}
+              <div class="face-tag-item {% if face.person_id %}is-named-face{% endif %}" id="face-tag-{{ face.face_id }}">
+                {% if face_url %}
+                  <a href="{{ face_url }}" style="display: block; line-height: 0; text-decoration: none;" title="View all photos & videos with {{ face.person_name }}">
+                    <img src="/api/faces/{{ face.face_id }}/crop" alt="Face" class="face-tag-thumb" style="transition: transform 0.2s ease; cursor: pointer;">
+                  </a>
+                {% else %}
+                  <img src="/api/faces/{{ face.face_id }}/crop" alt="Face" class="face-tag-thumb">
+                {% endif %}
+                
+                <div style="flex: 1; min-width: 0;" x-data="{ editing: false }">
+                  <div x-show="!editing" style="display: flex; align-items: center; justify-content: space-between; gap: 0.4rem;">
+                    <div>
+                      {% if face_url %}
+                        <a href="{{ face_url }}" style="color: #a5b4fc; font-weight: 600; text-decoration: none; font-size: 0.875rem;" title="View all photos & videos with {{ face.person_name }}">
+                          {{ face.person_name }}
+                        </a>
+                      {% else %}
+                        <span style="color: var(--text-muted); font-size: 0.875rem;">{{ face.person_name }}</span>
+                      {% endif %}
+                      <div style="font-size: 0.7rem; color: var(--text-dim);">
+                        Conf: {{ '%.0f' | format(face.confidence * 100) }}%
+                        {% if face.appearance_count and face.appearance_count > 1 %}
+                          • {{ face.appearance_count }} frames
+                        {% endif %}
+                      </div>
+                    </div>
+                    
+                    <button @click="editing = true" class="btn" style="padding: 0.2rem 0.4rem; font-size: 0.75rem;" title="Rename or assign name">
+                      Name
+                    </button>
+                  </div>
+
+                  <!-- Quick Name Form -->
+                  <form 
+                    x-show="editing" 
+                    style="display: none;" 
+                    hx-post="/api/faces/{{ face.face_id }}/name" 
+                    hx-target="#modal-container"
+                    hx-swap="innerHTML"
+                    @submit="editing = false"
+                  >
+                    <input type="hidden" name="image_id" value="{{ image.id }}">
+                    <input type="text" name="name" placeholder="Enter person name..." class="inline-edit-input" autofocus style="margin-bottom: 0.3rem;">
+                    <div style="display: flex; gap: 0.3rem;">
+                      <button type="submit" class="btn btn-primary" style="padding: 0.2rem 0.5rem; font-size: 0.75rem;">Save</button>
+                      <button type="button" @click="editing = false" class="btn" style="padding: 0.2rem 0.5rem; font-size: 0.75rem;">Cancel</button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            {% endfor %}
+          </div>
+        {% else %}
+          <div style="font-size: 0.8125rem; color: var(--text-dim); padding: 0.5rem 0;">
+            No faces detected in this media.
+          </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>

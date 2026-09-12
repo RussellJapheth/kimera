@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+
+{% block title %}{{ person.name }} - Kimera Gallery{% endblock %}
+
+{% block content %}
+<div style="margin-bottom: 2rem;">
+  <a href="/people" class="btn" style="margin-bottom: 1.5rem; display: inline-flex;">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="m15 18-6-6 6-6"/>
+    </svg>
+    All People & Faces
+  </a>
+
+  <div style="display: flex; align-items: center; gap: 1.5rem; flex-wrap: wrap; background: var(--surface-card); padding: 1.5rem; border-radius: var(--radius-lg); border: 1px solid var(--border-subtle);">
+    <div style="width: 90px; height: 90px; border-radius: var(--radius-full); overflow: hidden; border: 3px solid var(--primary); background: #090e17; flex-shrink: 0;">
+      {% if person.cover_face_id %}
+        <img src="/api/faces/{{ person.cover_face_id }}/crop" alt="{{ person.name }}" style="width: 100%; height: 100%; object-fit: cover;">
+      {% else %}
+        <div class="person-avatar-placeholder">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <circle cx="12" cy="8" r="5"/>
+            <path d="M20 21a8 8 0 1 0-16 0"/>
+          </svg>
+        </div>
+      {% endif %}
+    </div>
+
+    <div style="flex: 1; min-width: 240px;">
+      <!-- Editable Name Header via HTMX -->
+      <div id="person-name-section">
+        <form hx-post="/api/people/{{ person.id }}/name" hx-target="#person-name-section" hx-swap="outerHTML" style="display: flex; align-items: center; gap: 0.5rem; max-width: 400px;">
+          <input type="text" name="name" value="{{ person.name }}" class="inline-edit-input" style="font-size: 1.25rem; font-weight: 700; padding: 0.4rem 0.75rem;">
+          <button type="submit" class="btn btn-primary" style="white-space: nowrap;">Save Name</button>
+        </form>
+      </div>
+
+      <p style="font-size: 0.875rem; color: var(--text-muted); margin-top: 0.5rem;">
+        Appears in {{ total }} media item{{ 's' if total != 1 else '' }} in your gallery
+      </p>
+    </div>
+  </div>
+</div>
+
+<div class="page-header">
+  <h2 class="page-title" style="font-size: 1.25rem;">Photos with {{ person.name }}</h2>
+
+  <!-- Sort Controls -->
+  <div class="sort-selector" style="display: flex; align-items: center; gap: 0.35rem; background: var(--surface-card); border: 1px solid var(--border-subtle); padding: 0.25rem 0.6rem; border-radius: var(--radius-full); font-size: 0.8125rem;">
+    <span style="color: var(--text-dim);">Sort:</span>
+    <a href="/person/{{ person.id }}?sort=date&order={% if sort_by == 'date' and sort_order == 'desc' %}asc{% else %}desc{% endif %}" class="sort-link {% if sort_by == 'date' %}active{% endif %}">
+      Date {% if sort_by == 'date' %}{{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}
+    </a>
+    <span style="color: var(--border-subtle);">|</span>
+    <a href="/person/{{ person.id }}?sort=name&order={% if sort_by == 'name' and sort_order == 'asc' %}desc{% else %}asc{% endif %}" class="sort-link {% if sort_by == 'name' %}active{% endif %}">
+      Name {% if sort_by == 'name' %}{{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}
+    </a>
+    <span style="color: var(--border-subtle);">|</span>
+    <a href="/person/{{ person.id }}?sort=faces&order={% if sort_by == 'faces' and sort_order == 'desc' %}asc{% else %}desc{% endif %}" class="sort-link {% if sort_by == 'faces' %}active{% endif %}">
+      Faces {% if sort_by == 'faces' %}{{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}
+    </a>
+  </div>
+</div>
+
+{% if images and images|length > 0 %}
+  <div class="photo-grid" id="photo-grid">
+    {% for image in images %}
+      {% include "partials/photo_card.html" %}
+    {% endfor %}
+
+    <!-- Infinite Scroll Lazy Loading Sentinel -->
+    {% if has_next %}
+      <div 
+        id="infinite-scroll-sentinel-2"
+        class="infinite-scroll-sentinel"
+        hx-get="/person/{{ person.id }}?page=2&infinite=1&sort={{ sort_by }}&order={{ sort_order }}"
+        hx-trigger="revealed"
+        hx-swap="outerHTML"
+      >
+        <div class="scroll-loading-spinner">
+          <div class="spinner"></div>
+          <span>Loading more photos...</span>
+        </div>
+      </div>
+    {% endif %}
+  </div>
+{% else %}
+  <div class="empty-state">
+    <p>No photos found for this person.</p>
+  </div>
+{% endif %}
+{% endblock %}

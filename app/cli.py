@@ -1,5 +1,5 @@
 """
-Command Line Interface for the offline face clustering tool.
+Command Line Interface for the offline face clustering tool and web gallery server.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ def print_summary(stats: dict) -> None:
         print(f"  Unclustered (Noise):  {stats['unclustered_faces']}")
     print("-" * 55)
 
-    if stats["clusters"]:
+    if stats.get("clusters"):
         table_data = []
         for c in stats["clusters"]:
             table_data.append([
@@ -70,13 +70,45 @@ def inspect_cluster_cmd(db_path: str, cluster_id: int) -> None:
     print("=" * 60 + "\n")
 
 
+def serve_cmd(
+    media_dir: str | None = None,
+    db_path: str = "face_clusters.db",
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    rescan: bool = False,
+) -> None:
+    """Run the web media gallery server."""
+    import uvicorn
+    from app.server import create_app
+
+    if media_dir and (rescan or not Path(db_path).exists()):
+        print(f"Indexing media directory: {media_dir} ...")
+        stats = run_pipeline(input_dir=media_dir, db_path=db_path)
+        print_summary(stats)
+
+    app = create_app(db_path=db_path)
+    print(f"\n=======================================================")
+    print(f"  ✨ Kimera Media Gallery running at: http://{host}:{port}")
+    print(f"  Database: {db_path}")
+    print(f"=======================================================\n")
+    uvicorn.run(app, host=host, port=port, log_level="info")
+
+
 def main(args: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m app",
-        description="Offline Photo Face-Clustering Tool POC"
+        description="Kimera: Offline Media Gallery & Face Clustering Tool"
     )
 
     subparsers = parser.add_subparsers(dest="subcommand", help="Subcommands")
+
+    # Serve subcommand (Web Gallery)
+    serve_parser = subparsers.add_parser("serve", help="Launch the local media gallery web UI")
+    serve_parser.add_argument("path", nargs="?", type=str, default=None, help="Directory path to auto-index")
+    serve_parser.add_argument("--db", type=str, default="face_clusters.db", help="SQLite database path")
+    serve_parser.add_argument("--host", type=str, default="127.0.0.1", help="Host address (default: 127.0.0.1)")
+    serve_parser.add_argument("--port", type=int, default=8000, help="Port (default: 8000)")
+    serve_parser.add_argument("--rescan", action="store_true", help="Force re-scan before launching")
 
     # Scan subcommand
     scan_parser = subparsers.add_parser("scan", help="Scan a directory, detect faces, and cluster them")
@@ -87,26 +119,33 @@ def main(args: list[str] | None = None) -> int:
     scan_parser.add_argument("--algo", type=str, default="dbscan", choices=["dbscan", "agglomerative"], help="Clustering algorithm")
     scan_parser.add_argument("--export", type=str, default=None, help="Directory to export cropped face cutouts grouped by person")
     scan_parser.add_argument("--scene-thresh", type=float, default=0.35, help="Video scene cut threshold (0.0 - 1.0, default: 0.35)")
-    scan_parser.add_argument("--min-interval", type=float, default=0.5, help="Minimum seconds between video keyframes (default: 0.5)")
-    scan_parser.add_argument("--max-interval", type=float, default=3.0, help="Maximum seconds between video keyframe samples (default: 3.0)")
+    scan_parser.add_argument("--min-interval", type=float, default=30.0, help="Minimum seconds between video keyframes (default: 30.0)")
+    scan_parser.add_argument("--max-interval", type=float, default=90.0, help="Maximum seconds between video keyframe samples (default: 90.0)")
 
     # Inspect subcommand
     inspect_parser = subparsers.add_parser("inspect", help="Inspect a specific person/cluster")
     inspect_parser.add_argument("cluster_id", type=int, help="Cluster ID to inspect")
     inspect_parser.add_argument("--db", type=str, default="face_clusters.db", help="SQLite database path (default: face_clusters.db)")
 
-    # Support default positional path if neither scan nor inspect is explicitly typed
     if args is None:
         args = sys.argv[1:]
 
     # If first argument is a valid directory or path not matching subcommands, treat as scan command
-    if args and args[0] not in ("scan", "inspect", "-h", "--help"):
-        # Prepend 'scan'
+    if args and args[0] not in ("scan", "inspect", "serve", "-h", "--help"):
         args = ["scan"] + args
 
     parsed = parser.parse_args(args)
 
-    if parsed.subcommand == "scan":
+    if parsed.subcommand == "serve":
+        serve_cmd(
+            media_dir=parsed.path,
+            db_path=parsed.db,
+            host=parsed.host,
+            port=parsed.port,
+            rescan=parsed.rescan,
+        )
+        return 0
+    elif parsed.subcommand == "scan":
         stats = run_pipeline(
             input_dir=parsed.path,
             db_path=parsed.db,

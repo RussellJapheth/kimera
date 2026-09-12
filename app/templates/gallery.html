@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+
+{% block title %}
+  {% if cluster_info %}
+    {{ cluster_info.name }} - Kimera Gallery
+  {% elif filter_type == 'favorites' %}
+    Favorites - Kimera Gallery
+  {% elif search %}
+    Search: {{ search }} - Kimera Gallery
+  {% else %}
+    Photos - Kimera Gallery
+  {% endif %}
+{% endblock %}
+
+{% block content %}
+<!-- Cluster Rename Banner if browsing a specific cluster -->
+{% if cluster_info %}
+  <div style="margin-bottom: 2rem;">
+    <a href="/people" class="btn" style="margin-bottom: 1.5rem; display: inline-flex;">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="m15 18-6-6 6-6"/>
+      </svg>
+      All People & Faces
+    </a>
+
+    <div style="display: flex; align-items: center; gap: 1.5rem; flex-wrap: wrap; background: var(--surface-card); padding: 1.5rem; border-radius: var(--radius-lg); border: 1px solid var(--border-subtle);">
+      <div style="width: 80px; height: 80px; border-radius: var(--radius-full); overflow: hidden; border: 3px solid #6366f1; background: #090e17; flex-shrink: 0;">
+        {% if cluster_info.cover_face_id %}
+          <img src="/api/faces/{{ cluster_info.cover_face_id }}/crop" alt="{{ cluster_info.name }}" style="width: 100%; height: 100%; object-fit: cover;">
+        {% else %}
+          <div class="person-avatar-placeholder">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <circle cx="12" cy="8" r="5"/>
+              <path d="M20 21a8 8 0 1 0-16 0"/>
+            </svg>
+          </div>
+        {% endif %}
+      </div>
+
+      <div style="flex: 1; min-width: 240px;">
+        <div id="cluster-name-section">
+          <form hx-post="/api/clusters/{{ cluster_info.cluster_id }}/name" hx-target="#cluster-name-section" hx-swap="outerHTML" style="display: flex; align-items: center; gap: 0.5rem; max-width: 450px;">
+            <input type="text" name="name" placeholder="Name this face (e.g. Alice)..." class="inline-edit-input" style="font-size: 1.15rem; font-weight: 700; padding: 0.45rem 0.75rem;">
+            <button type="submit" class="btn btn-primary" style="white-space: nowrap;">Assign Name</button>
+          </form>
+        </div>
+        <p style="font-size: 0.8125rem; color: var(--text-muted); margin-top: 0.5rem;">
+          Assigning a name will group all {{ total }} photo{{ 's' if total != 1 else '' }} in this cluster under a named person profile.
+        </p>
+      </div>
+    </div>
+  </div>
+{% endif %}
+
+<div class="page-header">
+  <div>
+    <h1 class="page-title">
+      {% if cluster_info %}
+        Photos of {{ cluster_info.name }}
+      {% elif filter_type == 'favorites' %}
+        ⭐ Favorites
+      {% elif search %}
+        Search Results for "{{ search }}"
+      {% else %}
+        All Photos & Videos
+      {% endif %}
+    </h1>
+    <p class="page-subtitle">{{ total }} media item{{ 's' if total != 1 else '' }} found</p>
+  </div>
+
+  <div style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
+    <div class="filter-pills">
+      <a href="/?sort={{ sort_by }}&order={{ sort_order }}" class="filter-pill {% if filter_type == 'all' and not search and not cluster_id %}active{% endif %}">All</a>
+      <a href="/?filter=favorites&sort={{ sort_by }}&order={{ sort_order }}" class="filter-pill {% if filter_type == 'favorites' %}active{% endif %}">
+        ⭐ Favorites
+      </a>
+    </div>
+
+    <!-- Sort Controls -->
+    <div class="sort-selector" style="display: flex; align-items: center; gap: 0.35rem; background: var(--surface-card); border: 1px solid var(--border-subtle); padding: 0.25rem 0.6rem; border-radius: var(--radius-full); font-size: 0.8125rem;">
+      <span style="color: var(--text-dim);">Sort:</span>
+      <a href="?sort=date&order={% if sort_by == 'date' and sort_order == 'desc' %}asc{% else %}desc{% endif %}{% if filter_type != 'all' %}&filter={{ filter_type }}{% endif %}{% if search %}&search={{ search }}{% endif %}{% if cluster_id is not none %}&cluster_id={{ cluster_id }}{% endif %}" class="sort-link {% if sort_by == 'date' %}active{% endif %}">
+        Date {% if sort_by == 'date' %}{{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}
+      </a>
+      <span style="color: var(--border-subtle);">|</span>
+      <a href="?sort=name&order={% if sort_by == 'name' and sort_order == 'asc' %}desc{% else %}asc{% endif %}{% if filter_type != 'all' %}&filter={{ filter_type }}{% endif %}{% if search %}&search={{ search }}{% endif %}{% if cluster_id is not none %}&cluster_id={{ cluster_id }}{% endif %}" class="sort-link {% if sort_by == 'name' %}active{% endif %}">
+        Name {% if sort_by == 'name' %}{{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}
+      </a>
+      <span style="color: var(--border-subtle);">|</span>
+      <a href="?sort=faces&order={% if sort_by == 'faces' and sort_order == 'desc' %}asc{% else %}desc{% endif %}{% if filter_type != 'all' %}&filter={{ filter_type }}{% endif %}{% if search %}&search={{ search }}{% endif %}{% if cluster_id is not none %}&cluster_id={{ cluster_id }}{% endif %}" class="sort-link {% if sort_by == 'faces' %}active{% endif %}">
+        Faces {% if sort_by == 'faces' %}{{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}
+      </a>
+    </div>
+  </div>
+</div>
+
+{% if images and images|length > 0 %}
+  <div class="photo-grid" id="photo-grid">
+    {% for image in images %}
+      {% include "partials/photo_card.html" %}
+    {% endfor %}
+
+    <!-- Infinite Scroll Lazy Loading Sentinel -->
+    {% if has_next %}
+      <div 
+        id="infinite-scroll-sentinel-2"
+        class="infinite-scroll-sentinel"
+        hx-get="/?page=2&infinite=1{% if filter_type != 'all' %}&filter={{ filter_type }}{% endif %}{% if search %}&search={{ search }}{% endif %}{% if cluster_id is not none %}&cluster_id={{ cluster_id }}{% endif %}&sort={{ sort_by }}&order={{ sort_order }}"
+        hx-trigger="revealed"
+        hx-swap="outerHTML"
+      >
+        <div class="scroll-loading-spinner">
+          <div class="spinner"></div>
+          <span>Loading more media...</span>
+        </div>
+      </div>
+    {% endif %}
+  </div>
+{% else %}
+  <div class="empty-state">
+    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#64748b" stroke-width="1.5" style="margin-bottom: 1rem;">
+      <rect width="18" height="18" x="3" y="3" rx="2" ry="2"/>
+      <circle cx="9" cy="9" r="2"/>
+      <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>
+    </svg>
+    <h3>No media found</h3>
+    <p>
+      {% if filter_type == 'favorites' %}
+        You haven't marked any photos as favorites yet. Click the heart icon on any photo to favorite it.
+      {% elif search %}
+        No photos or people matched your search criteria.
+      {% else %}
+        No photos have been indexed in this directory yet. Visit <a href="/settings" style="color: #a5b4fc;">Settings</a> to run a scan.
+      {% endif %}
+    </p>
+  </div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Kimera Media Gallery{% endblock %}</title>
+  
+  <!-- Self-contained local styles & offline vendor scripts -->
+  <link rel="stylesheet" href="/static/css/gallery.css">
+  <script src="/static/vendor/htmx.min.js"></script>
+  <script src="/static/vendor/alpine.min.js" defer></script>
+</head>
+<body x-data="{
+  activeModal: false,
+  modalImageId: null,
+  prevId: null,
+  nextId: null,
+  touchStartX: 0,
+  touchStartY: 0,
+  stopModalMedia() {
+    const container = document.getElementById('modal-container');
+    if (container) {
+      const videos = container.querySelectorAll('video');
+      videos.forEach(v => {
+        try {
+          v.pause();
+          v.currentTime = 0;
+          v.removeAttribute('src');
+          v.load();
+        } catch (e) {}
+      });
+    }
+  },
+  openModal(id, prev = null, next = null) {
+    this.stopModalMedia();
+    this.modalImageId = id;
+    this.prevId = prev;
+    this.nextId = next;
+    this.activeModal = true;
+    const params = new URLSearchParams(window.location.search);
+    htmx.ajax('GET', '/api/photos/' + id + '/modal?' + params.toString(), {target: '#modal-container', swap: 'innerHTML'});
+  },
+  setNeighbors(prev, next) {
+    this.prevId = prev;
+    this.nextId = next;
+  },
+  closeModal() {
+    this.stopModalMedia();
+    const container = document.getElementById('modal-container');
+    if (container) {
+      container.innerHTML = '';
+    }
+    this.activeModal = false;
+    this.modalImageId = null;
+    this.prevId = null;
+    this.nextId = null;
+  },
+  handleTouchStart(e) {
+    this.touchStartX = e.touches[0].clientX;
+    this.touchStartY = e.touches[0].clientY;
+  },
+  handleTouchEnd(e) {
+    if (!this.activeModal) return;
+    const touchEndX = e.changedTouches[0].clientX;
+    const touchEndY = e.changedTouches[0].clientY;
+    const diffX = touchEndX - this.touchStartX;
+    const diffY = touchEndY - this.touchStartY;
+    if (Math.abs(diffX) > 40 && Math.abs(diffX) > Math.abs(diffY)) {
+      if (diffX < 0 && this.nextId) {
+        this.openModal(this.nextId);
+      } else if (diffX > 0 && this.prevId) {
+        this.openModal(this.prevId);
+      }
+    }
+  }
+}" 
+@keydown.escape.window="closeModal()"
+@keydown.left.window="if (activeModal && prevId) { openModal(prevId); }"
+@keydown.right.window="if (activeModal && nextId) { openModal(nextId); }"
+@touchstart="handleTouchStart($event)"
+@touchend="handleTouchEnd($event)"
+>
+
+  <!-- Sticky Navbar -->
+  <header class="navbar">
+    <a href="/" class="nav-brand">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/>
+        <circle cx="12" cy="13" r="3"/>
+      </svg>
+      <span>Kimera</span>
+      <span class="brand-badge">Gallery</span>
+    </a>
+
+    <nav class="nav-links">
+      <a href="/" class="nav-item {% if active_page == 'photos' %}active{% endif %}">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect width="18" height="18" x="3" y="3" rx="2" ry="2"/>
+          <circle cx="9" cy="9" r="2"/>
+          <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>
+        </svg>
+        Photos
+      </a>
+      <a href="/folders" class="nav-item {% if active_page == 'folders' %}active{% endif %}">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+        </svg>
+        Folders
+      </a>
+      <a href="/people" class="nav-item {% if active_page == 'people' %}active{% endif %}">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+          <circle cx="9" cy="7" r="4"/>
+          <path d="M22 21v-2a4 4 0 0 0-3-3.87"/>
+          <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+        </svg>
+        People & Faces
+      </a>
+      <a href="/?filter=favorites" class="nav-item {% if active_page == 'favorites' %}active{% endif %}">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/>
+        </svg>
+        Favorites
+      </a>
+      <a href="/settings" class="nav-item {% if active_page == 'settings' %}active{% endif %}">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
+          <circle cx="12" cy="12" r="3"/>
+        </svg>
+        Settings
+      </a>
+    </nav>
+
+    <div class="nav-actions">
+      <form action="/" method="GET" class="search-form">
+        <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="8"/>
+          <path d="m21 21-4.3-4.3"/>
+        </svg>
+        <input type="text" name="search" value="{{ search or '' }}" placeholder="Search file, folder, person..." class="search-input">
+      </form>
+    </div>
+  </header>
+
+  <!-- Main View Container -->
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+
+  <!-- Lightbox Modal Target -->
+  <div x-show="activeModal" style="display: none;" class="modal-backdrop" @click.self="closeModal()">
+    <div id="modal-container" style="width: 100%; display: flex; justify-content: center;">
+      <!-- Dynamic Lightbox Content Injected by HTMX -->
+    </div>
+  </div>
+
+  {% block scripts %}{% endblock %}
+</body>
+</html>

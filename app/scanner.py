@@ -4,6 +4,7 @@ Media scanning, loading, and video keyframe extraction utilities.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 from typing import Generator, List, NamedTuple, Optional
@@ -14,6 +15,32 @@ from PIL import Image, ImageOps
 SUPPORTED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"}
 SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".m4v"}
 SUPPORTED_EXTENSIONS = SUPPORTED_IMAGE_EXTENSIONS | SUPPORTED_VIDEO_EXTENSIONS
+
+
+def compute_quick_hash(path: Path | str, chunk_size: int = 65536) -> str:
+    """
+    Compute fast content fingerprint by hashing first 64KB + last 64KB + total file size.
+    Prevents reading entire gigabyte files when validating modifications.
+    """
+    p = Path(path)
+    if not p.is_file():
+        return ""
+    try:
+        size = p.stat().st_size
+        hasher = hashlib.sha256()
+        with open(p, "rb") as f:
+            # Read first chunk
+            first_chunk = f.read(chunk_size)
+            hasher.update(first_chunk)
+            # If larger than chunk size, seek and read last chunk
+            if size > chunk_size:
+                f.seek(max(0, size - chunk_size))
+                last_chunk = f.read(chunk_size)
+                hasher.update(last_chunk)
+        hasher.update(str(size).encode("utf-8"))
+        return hasher.hexdigest()[:24]
+    except Exception:
+        return ""
 
 
 class VideoKeyframe(NamedTuple):
@@ -83,8 +110,8 @@ def load_image_rgb(image_path: Path | str) -> Optional[np.ndarray]:
 def extract_video_keyframes(
     video_path: Path | str,
     scene_threshold: float = 0.35,
-    min_interval_sec: float = 0.5,
-    max_interval_sec: float = 3.0,
+    min_interval_sec: float = 30.0,
+    max_interval_sec: float = 90.0,
 ) -> Generator[VideoKeyframe, None, None]:
     """
     Efficiently extract keyframes from a video file using adaptive scene-cut detection

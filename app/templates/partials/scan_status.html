@@ -1,0 +1,65 @@
+<div id="scan-status-container" {% if scan_mgr.is_running %}hx-get="/api/scan/status" hx-trigger="every 1s" hx-swap="outerHTML"{% endif %}>
+  <div class="scan-status-card {% if scan_mgr.is_running %}is-active{% elif scan_mgr.status == 'completed' %}is-success{% elif scan_mgr.status == 'error' %}is-error{% endif %}">
+    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem;">
+      <div style="display: flex; align-items: center; gap: 0.6rem;">
+        {% if scan_mgr.is_running %}
+          <div class="spinner" style="width: 18px; height: 18px; border-width: 2px;"></div>
+          <strong style="color: #818cf8;">Scanning Media ({{ scan_mgr.percent }}%)</strong>
+        {% elif scan_mgr.status == 'completed' %}
+          <div style="color: #10b981; font-weight: 700; font-size: 1.1rem;">✓ Scan Completed</div>
+        {% elif scan_mgr.status == 'error' %}
+          <div style="color: #ef4444; font-weight: 700; font-size: 1.1rem;">✕ Scan Error</div>
+        {% else %}
+          <div style="color: var(--text-muted);">Status: Ready</div>
+        {% endif %}
+      </div>
+
+      <div style="display: flex; align-items: center; gap: 0.5rem;">
+        {% if scan_mgr.is_running and scan_mgr.total_count > 0 %}
+          <span style="font-size: 0.75rem; color: var(--text-muted);">{{ scan_mgr.current_count }} / {{ scan_mgr.total_count }} items</span>
+        {% endif %}
+        <span class="badge" style="background: rgba(255, 255, 255, 0.08); padding: 0.2rem 0.6rem; border-radius: 9999px; font-size: 0.75rem;">
+          {{ scan_mgr.status|upper }}
+        </span>
+      </div>
+    </div>
+
+    <p style="font-size: 0.875rem; color: var(--text-main); margin-bottom: 0.5rem; word-break: break-all;">
+      {{ scan_mgr.progress_message }}
+    </p>
+
+    {% if scan_mgr.is_running %}
+      <div class="progress-bar-container">
+        <div class="progress-bar-fill" style="width: {{ scan_mgr.percent }}%;"></div>
+      </div>
+    {% endif %}
+
+    {% if scan_mgr.stats %}
+      <div class="scan-stats-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 0.75rem; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border-subtle);">
+        <div class="mini-stat">
+          <div class="mini-stat-val">{{ scan_mgr.stats.get('images_scanned', 0) }}</div>
+          <div class="mini-stat-label">Media Scanned</div>
+        </div>
+        <div class="mini-stat">
+          <div class="mini-stat-val">{{ scan_mgr.stats.get('faces_detected', 0) }}</div>
+          <div class="mini-stat-label">Faces Found</div>
+        </div>
+        <div class="mini-stat">
+          <div class="mini-stat-val">{{ scan_mgr.stats.get('num_clusters', 0) }}</div>
+          <div class="mini-stat-label">People Clusters</div>
+        </div>
+      </div>
+    {% endif %}
+
+    {% if scan_mgr.logs %}
+      <div style="margin-top: 1rem;">
+        <div style="font-size: 0.75rem; font-weight: 600; color: var(--text-muted); margin-bottom: 0.35rem;">Execution Logs</div>
+        <div class="logs-console">
+          {% for line in scan_mgr.logs %}
+            <div>&gt; {{ line }}</div>
+          {% endfor %}
+        </div>
+      </div>
+    {% endif %}
+  </div>
+</div>

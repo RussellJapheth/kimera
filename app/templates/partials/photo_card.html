@@ -1,0 +1,47 @@
+<div class="photo-card {% if image.is_favorite %}is-fav{% endif %} {% if image.is_video %}is-video{% endif %}" id="photo-card-{{ image.id }}">
+  <img src="/api/photos/{{ image.id }}/thumbnail" alt="{{ image.filename }}" loading="lazy" @click="openModal({{ image.id }})">
+  
+  {% if image.is_video %}
+    <div class="video-play-indicator" @click="openModal({{ image.id }})" title="Play Video">
+      <div class="video-play-icon">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+          <polygon points="6 4 20 12 6 20 6 4"/>
+        </svg>
+      </div>
+      <span class="video-badge-label">Video</span>
+    </div>
+  {% endif %}
+
+  <div class="card-overlay">
+    <div class="card-top">
+      <div style="display: flex; align-items: center; gap: 0.35rem;">
+        {% if image.face_count > 0 %}
+          <span class="face-badge" title="{{ image.face_count }} face(s) detected">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+              <circle cx="9" cy="7" r="4"/>
+            </svg>
+            {{ image.face_count }}
+          </span>
+        {% endif %}
+      </div>
+
+      <button 
+        class="fav-btn {% if image.is_favorite %}active{% endif %}"
+        hx-post="/api/photos/{{ image.id }}/favorite"
+        hx-target="#photo-card-{{ image.id }}"
+        hx-swap="outerHTML"
+        title="Toggle favorite"
+        @click.stop
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="{% if image.is_favorite %}currentColor{% else %}none{% endif %}" stroke="currentColor" stroke-width="2">
+          <path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/>
+        </svg>
+      </button>
+    </div>
+
+    <div class="card-bottom" @click="openModal({{ image.id }})">
+      <span class="card-info">{{ image.filename }}</span>
+    </div>
+  </div>
+</div>

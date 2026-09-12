@@ -1,16 +1,18 @@
-# Kimera: Offline Photo Face-Clustering Tool POC
+# Kimera: Offline Media Gallery & SOTA Face Recognition
 
-A lightweight, fully offline Python CLI tool to recursively scan a photo directory, detect human faces, extract facial embeddings, cluster identical individuals together, and persist all detections and metadata into a local SQLite database.
+A high-performance, 100% self-contained offline media library and facial clustering web app. Recursively scans media folders, generates WebP thumbnail & face crop caches, groups unique people, lets you name & merge faces (Google Photos style), and supports favorite photos.
 
 ## Key Features
 
-- **100% Offline & Private**: Zero external cloud APIs or web services required.
-- **Lightweight Inference**: Powered by ONNX Runtime with CPU fallback and optional CUDA GPU acceleration for systems with $\le$ 4 GB VRAM.
-  - **Detector**: YuNet ONNX (~336 KB)
-  - **Embedder**: SFace ONNX (~37 MB)
-- **Automatic Cosine Clustering**: Groups identical faces into cluster IDs using DBSCAN or Agglomerative clustering on L2-normalized embeddings.
-- **Local SQLite Persistence**: Stores image paths, detected face bounding boxes, confidence scores, embeddings (binary BLOB), and assigned cluster/person IDs.
-- **Detailed Summaries & Inspection**: Provides cluster breakdowns and lets you inspect any cluster to list its associated image files.
+- **100% Offline & Self-Contained**: Zero external CDNs or cloud APIs. Alpine.js and HTMX vendored locally.
+- **SOTA Face Models**: Powered by InsightFace `buffalo_l` (SCRFD-10G face detector + ArcFace ResNet-50 512D embeddings) with automatic CPU/GPU acceleration and YuNet/SFace fallback.
+- **Rich Media Gallery Web UI**:
+  - Soft Twilight Slate aesthetic with custom CSS (no harsh pure blacks, clean glassmorphism).
+  - Responsive photo grid with WebP cached thumbnails.
+  - Interactive Lightbox photo viewer with face detection highlights and EXIF metadata.
+  - One-click photo Favorites (⭐).
+  - **People & Faces**: Google Photos-style face bubbles, avatar crops, inline face naming, search, and person merging.
+- **Local SQLite Persistence**: Stores image metadata, dimensions, favorites, face bounding boxes, embeddings (binary BLOB), and named people.
 
 ---
 
@@ -36,15 +38,26 @@ pip install -r requirements.txt
 
 ## Usage
 
-### 1. Scan and Cluster Photos
+### 1. Launch the Media Gallery Web UI (Recommended)
+
+Launch the web app on `http://127.0.0.1:8000` and optionally auto-index a photo folder:
+
+```bash
+# Launch web gallery and auto-index photos
+python -m app serve /path/to/photos
+
+# Or launch existing database
+python -m app serve --port 8000
+```
+
+---
+
+### 2. Scan and Cluster via CLI
 
 Recursively scan an input directory, detect faces, compute embeddings, cluster individuals, and view a summary table:
 
 ```bash
 # Basic scan
-python -m app /path/to/photos
-
-# Or explicitly using the 'scan' subcommand
 python -m app scan /path/to/photos
 
 # Customize SQLite database file and clustering thresholds:
