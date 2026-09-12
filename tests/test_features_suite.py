@@ -314,3 +314,331 @@ def test_model_download_with_progress(tmp_path):
     assert dest.read_bytes() == fake_data
     assert len(progress_reports) > 0
     assert progress_reports[-1][1] == 100
+
+
+def test_settings_persistence(test_env):
+    db = test_env["db"]
+    client = test_env["client"]
+
+    # Initial get
+    assert db.get_setting("eps", "default") == "default"
+
+    # Save settings via endpoint
+    resp = client.post("/api/settings/save", data={
+        "input_dir": "/tmp/media",
+        "conf_threshold": "0.60",
+        "eps": "0.38",
+        "min_samples": "2",
+        "algorithm": "agglomerative",
+        "min_interval_sec": "45.0"
+    })
+    assert resp.status_code == 200
+    assert "Settings saved successfully" in resp.text
+
+    # Verify DB persistence
+    all_s = db.get_all_settings()
+    assert all_s["eps"] == "0.38"
+    assert all_s["algorithm"] == "agglomerative"
+    assert all_s["conf_threshold"] == "0.6"
+    assert all_s["min_samples"] == "2"
+
+    # Verify /settings page loads saved values
+    get_resp = client.get("/settings")
+    assert get_resp.status_code == 200
+    assert 'value="0.38"' in get_resp.text
+    assert 'value="0.6"' in get_resp.text or 'value="0.60"' in get_resp.text
+    assert 'selected>Agglomerative' in get_resp.text
+
+
+def test_move_face_and_unlink(test_env):
+    db = test_env["db"]
+    client = test_env["client"]
+    id1 = test_env["ids"][0]
+
+    img = db.get_image(id1)
+    face_id = img["faces"][0]["face_id"]
+
+    # 1. Unlink face
+    unlink_resp = client.post(f"/api/faces/{face_id}/unlink", data={"image_id": id1})
+    assert unlink_resp.status_code == 200
+    face_rec = db.get_face(face_id)
+    assert face_rec["person_id"] is None
+    assert face_rec["cluster_id"] == -1
+
+    # 2. Move face to a new person
+    move_new_resp = client.post(f"/api/faces/{face_id}/move", data={
+        "image_id": id1,
+        "target_type": "new",
+        "new_name": "Bob",
+    })
+    assert move_new_resp.status_code == 200
+    face_rec = db.get_face(face_id)
+    assert face_rec["person_name"] == "Bob"
+    bob_person_id = face_rec["person_id"]
+
+    # 3. Move face to an existing person
+    alice_id = test_env["person_id"]
+    move_existing_resp = client.post(f"/api/faces/{face_id}/move", data={
+        "image_id": id1,
+        "target_type": "person",
+        "target_id": alice_id,
+    })
+    assert move_existing_resp.status_code == 200
+    face_rec = db.get_face(face_id)
+    assert face_rec["person_id"] == alice_id
+
+
+def test_merge_people_and_clusters(test_env):
+    db = test_env["db"]
+    client = test_env["client"]
+
+    # Create two people
+    p1 = db.name_person("PersonOne")
+    p2 = db.name_person("PersonTwo")
+
+    emb = np.random.randn(512).astype(np.float32)
+    f1 = db.insert_face(test_env["ids"][0], (0, 0, 10, 10), 0.9, emb, cluster_id=10, person_id=p1)
+    f2 = db.insert_face(test_env["ids"][1], (0, 0, 10, 10), 0.9, emb, cluster_id=11, person_id=p2)
+
+    # Merge p1 into p2
+    resp = client.post(f"/api/people/{p1}/merge", data={"target_person_id": p2})
+    assert resp.status_code == 200
+    assert resp.headers.get("HX-Redirect") == f"/person/{p2}"
+
+    # Verify p1 is deleted and f1 is now assigned to p2
+    assert db.get_person(p1) is None
+    assert db.get_face(f1)["person_id"] == p2
+
+    # Merge p2 into cluster 99
+    resp_cluster_target = client.post(f"/api/people/{p2}/merge", data={"target_type": "cluster", "target_id": 99})
+    assert resp_cluster_target.status_code == 200
+    assert resp_cluster_target.headers.get("HX-Redirect") == "/?cluster_id=99"
+    assert db.get_person(p2) is None
+    assert db.get_face(f1)["cluster_id"] == 99
+    assert db.get_face(f1)["person_id"] is None
+
+    # Merge cluster 12 into p3
+    p3 = db.name_person("Charlie")
+    f3 = db.insert_face(test_env["ids"][2], (0, 0, 10, 10), 0.9, emb, cluster_id=12, person_id=None)
+    resp_cluster = client.post("/api/clusters/12/merge", data={"target_type": "person", "target_id": p3})
+    assert resp_cluster.status_code == 200
+    assert db.get_face(f3)["person_id"] == p3
+
+
+def test_target_picker_endpoint(test_env):
+    client = test_env["client"]
+    resp = client.get("/api/targets/picker?mode=move_face&source_id=1&image_id=1")
+    assert resp.status_code == 200
+    assert "Move Face to Person or Cluster" in resp.text
+    assert "target-picker-modal" in resp.text
+
+    # Test live-search items endpoint
+    resp_items = client.get("/api/targets/items?mode=move_face&source_id=1&image_id=1&search=Alice")
+    assert resp_items.status_code == 200
+    assert "Alice" in resp_items.text
+
+    # Search with no match
+    resp_none = client.get("/api/targets/items?mode=move_face&source_id=1&image_id=1&search=NonExistentPersonXYZ")
+    assert resp_none.status_code == 200
+    assert "No matching people or clusters found" in resp_none.text
+
+
+def test_k_medoids_selection():
+    from app.recognition import select_k_medoids
+
+    # 1. Empty and small sets
+    assert select_k_medoids([]) == []
+    single_v = [np.random.randn(512).astype(np.float32)]
+    res_single = select_k_medoids(single_v, k=5)
+    assert len(res_single) == 1
+
+    # 2. Synthetic cluster of 20 vectors around 3 distinct centers (e.g. frontal, profile, glasses)
+    center1 = np.random.randn(512).astype(np.float32)
+    center2 = np.random.randn(512).astype(np.float32)
+    center3 = np.random.randn(512).astype(np.float32)
+
+    vecs = []
+    for _ in range(7):
+        vecs.append(center1 + np.random.randn(512) * 0.05)
+    for _ in range(7):
+        vecs.append(center2 + np.random.randn(512) * 0.05)
+    for _ in range(6):
+        vecs.append(center3 + np.random.randn(512) * 0.05)
+
+    medoids = select_k_medoids(vecs, k=3)
+    assert len(medoids) == 3
+    # Ensure vectors are normalized
+    for m in medoids:
+        assert np.isclose(np.linalg.norm(m), 1.0, atol=1e-4)
+
+
+def test_multi_exemplar_matcher():
+    from app.recognition import MultiExemplarMatcher
+
+    base_alice = np.random.randn(512).astype(np.float32)
+    base_bob = np.random.randn(512).astype(np.float32)
+
+    base_alice /= np.linalg.norm(base_alice)
+    base_bob /= np.linalg.norm(base_bob)
+
+    exemplars = {
+        1: [base_alice],
+        2: [base_bob],
+    }
+    matcher = MultiExemplarMatcher(exemplars)
+
+    # Similar to Alice
+    query_alice = base_alice + np.random.randn(512) * 0.02
+    match = matcher.match_face(query_alice, threshold=0.38)
+    assert match is not None
+    assert match[0] == 1
+
+    # Similar to Alice but Alice is in exclusions
+    match_excluded = matcher.match_face(query_alice, exclusions={1}, threshold=0.38)
+    assert match_excluded is None
+
+    # Batch match
+    batch_faces = [
+        {"id": 101, "embedding": query_alice},
+        {"id": 102, "embedding": base_bob + np.random.randn(512) * 0.02},
+        {"id": 103, "embedding": np.random.randn(512)},  # Random face, should not match
+    ]
+    batch_results = matcher.match_faces_batch(batch_faces, threshold=0.38)
+    assert 101 in batch_results and batch_results[101][0] == 1
+    assert 102 in batch_results and batch_results[102][0] == 2
+    assert 103 not in batch_results
+
+
+def test_already_named_faces_seeding_and_autotag(test_env):
+    db = test_env["db"]
+    client = test_env["client"]
+
+    # 1. Existing named person "Diana" with 2 face embeddings
+    p_diana = db.name_person("Diana")
+    diana_emb = np.random.randn(512).astype(np.float32)
+    diana_emb /= np.linalg.norm(diana_emb)
+
+    f_d1 = db.insert_face(test_env["ids"][0], (0, 0, 10, 10), 0.95, diana_emb, cluster_id=1, person_id=p_diana)
+    f_d2 = db.insert_face(test_env["ids"][1], (0, 0, 10, 10), 0.95, diana_emb + np.random.randn(512) * 0.01, cluster_id=1, person_id=p_diana)
+
+    # Check that get_all_person_exemplars returns Diana's exemplars
+    all_ex = db.get_all_person_exemplars()
+    assert p_diana in all_ex
+    assert len(all_ex[p_diana]) == 2
+
+    # 2. Insert unassigned face that matches Diana
+    diana_variant = diana_emb + np.random.randn(512) * 0.02
+    f_unassigned = db.insert_face(test_env["ids"][2], (0, 0, 10, 10), 0.95, diana_variant, cluster_id=-1, person_id=None)
+
+    # Run single-person auto-tag endpoint
+    resp_autotag = client.post(f"/api/people/{p_diana}/autotag")
+    assert resp_autotag.status_code == 200
+
+    # Face should now be assigned to Diana
+    assert db.get_face(f_unassigned)["person_id"] == p_diana
+
+    # 3. Test Unlink + Exclusion
+    # If user unlinks f_unassigned, it shouldn't be auto-tagged back to Diana
+    db.move_face(f_unassigned, unlink=True)
+    assert db.get_face(f_unassigned)["person_id"] is None
+    excl = db.get_person_exclusions()
+    assert f_unassigned in excl and p_diana in excl[f_unassigned]
+
+    # Re-run auto-tag all: excluded face must NOT be assigned to Diana
+    resp_autotag_all = client.post("/api/people/autotag-all")
+    assert resp_autotag_all.status_code == 200
+    assert db.get_face(f_unassigned)["person_id"] is None
+
+
+def test_pipeline_preserves_named_and_auto_tags_unassigned(tmp_path, monkeypatch):
+    """Verify that run_pipeline uses existing named people exemplars to auto-tag matching faces."""
+    from PIL import Image
+    from app.pipeline import run_pipeline
+    from app.db import Database
+    from unittest.mock import MagicMock
+
+    media_dir = tmp_path / "media"
+    media_dir.mkdir()
+    db_file = tmp_path / "test.db"
+    db = Database(db_file)
+
+    # 1. Pre-populate database with an existing named person "Edward"
+    p_edward = db.name_person("Edward")
+    edward_emb = np.random.randn(512).astype(np.float32)
+    edward_emb /= np.linalg.norm(edward_emb)
+
+    # Image 1 is already in library with Edward
+    img1_path = media_dir / "edward_photo.jpg"
+    Image.new("RGB", (100, 100), color="blue").save(img1_path)
+    img1_id = db.insert_image(str(img1_path.resolve()), 100, 100, file_size=img1_path.stat().st_size, mtime=img1_path.stat().st_mtime)
+    f_orig = db.insert_face(img1_id, (10, 10, 50, 50), 0.95, edward_emb, cluster_id=1, person_id=p_edward)
+
+    # Image 2 is a new photo with 2 faces: one matching Edward, one stranger
+    img2_path = media_dir / "group_photo.jpg"
+    Image.new("RGB", (200, 200), color="green").save(img2_path)
+
+    stranger_emb = np.random.randn(512).astype(np.float32)
+    stranger_emb /= np.linalg.norm(stranger_emb)
+
+    # Mock FaceDetector and FaceEmbedder so run_pipeline doesn't load heavy ONNX models
+    class MockFace:
+        def __init__(self, bbox, conf):
+            self.bbox = bbox
+            self.confidence = conf
+            self.raw_face = None
+
+    class MockDetector:
+        def __init__(self, **kwargs):
+            pass
+        def detect(self, img_rgb):
+            # Returns 2 faces for group photo
+            return [MockFace((10, 10, 50, 50), 0.95), MockFace((60, 60, 100, 100), 0.92)]
+
+    class MockEmbedder:
+        def __init__(self, **kwargs):
+            self.call_count = 0
+        def extract_embedding(self, img_rgb, raw_face):
+            self.call_count += 1
+            if self.call_count % 2 == 1:
+                # Returns vector close to Edward
+                return edward_emb + np.random.randn(512).astype(np.float32) * 0.02
+            else:
+                # Returns stranger vector
+                return stranger_emb
+
+    monkeypatch.setattr("app.pipeline.FaceDetector", MockDetector)
+    monkeypatch.setattr("app.pipeline.FaceEmbedder", MockEmbedder)
+
+    # Run the pipeline
+    stats = run_pipeline(
+        input_dir=str(media_dir),
+        db_path=str(db_file),
+        cache_dir=str(tmp_path / "cache"),
+        match_threshold=0.38,
+    )
+
+    # Check assertions:
+    # 1. Edward's original face is untouched and still assigned to Edward
+    assert db.get_face(f_orig)["person_id"] == p_edward
+
+    # 2. Image 2 faces:
+    meta_map = db.get_all_images_file_meta_map()
+    img2_id = meta_map[str(img2_path.resolve())]["id"]
+    img2_record = db.get_image(img2_id)
+    assert img2_record is not None
+    img2_faces = img2_record["faces"]
+    assert len(img2_faces) == 2
+
+    # One face should be auto-assigned to Edward
+    edward_faces_in_img2 = [f for f in img2_faces if f["person_id"] == p_edward]
+    assert len(edward_faces_in_img2) == 1
+    assert edward_faces_in_img2[0]["person_name"] == "Edward"
+
+    # The stranger face should have person_id=None and a valid cluster_id >= 0
+    stranger_faces_in_img2 = [f for f in img2_faces if f["person_id"] is None]
+    assert len(stranger_faces_in_img2) == 1
+    assert stranger_faces_in_img2[0]["cluster_id"] >= 0
+
+
+
+

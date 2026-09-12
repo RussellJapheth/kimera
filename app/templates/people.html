@@ -3,7 +3,7 @@
 {% block title %}People & Faces - Kimera Gallery{% endblock %}
 
 {% block content %}
-<div class="page-header">
+<div class="page-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
   <div>
     <h1 class="page-title">
       <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -16,7 +16,26 @@
     </h1>
     <p class="page-subtitle">{{ people|length }} recognized individual{{ 's' if people|length != 1 else '' }} in your media library</p>
   </div>
+
+  <div>
+    <button 
+      type="button" 
+      class="btn" 
+      style="background: rgba(16, 185, 129, 0.15); border-color: rgba(16, 185, 129, 0.4); color: #6ee7b7; display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem;"
+      hx-post="/api/people/autotag-all"
+      hx-target="#autotag-all-alert"
+      hx-swap="innerHTML"
+      title="Match all unassigned faces in the library against named people profiles"
+    >
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>
+      </svg>
+      Auto-Tag Library
+    </button>
+  </div>
 </div>
+
+<div id="autotag-all-alert" style="margin-bottom: 1.5rem;"></div>
 
 {% if people and people|length > 0 %}
   <div class="people-grid">

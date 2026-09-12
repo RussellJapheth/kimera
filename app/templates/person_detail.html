@@ -27,12 +27,43 @@
 
     <div style="flex: 1; min-width: 240px;">
       <!-- Editable Name Header via HTMX -->
-      <div id="person-name-section">
-        <form hx-post="/api/people/{{ person.id }}/name" hx-target="#person-name-section" hx-swap="outerHTML" style="display: flex; align-items: center; gap: 0.5rem; max-width: 400px;">
+      <div id="person-name-section" style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
+        <form hx-post="/api/people/{{ person.id }}/name" hx-target="#person-name-section" hx-swap="outerHTML" style="display: flex; align-items: center; gap: 0.5rem; max-width: 360px;">
           <input type="text" name="name" value="{{ person.name }}" class="inline-edit-input" style="font-size: 1.25rem; font-weight: 700; padding: 0.4rem 0.75rem;">
           <button type="submit" class="btn btn-primary" style="white-space: nowrap;">Save Name</button>
         </form>
+
+        <button 
+          type="button" 
+          class="btn" 
+          style="border-color: rgba(99, 102, 241, 0.4); color: #a5b4fc; display: inline-flex; align-items: center; gap: 0.4rem;"
+          title="Merge this person profile into another person"
+          @click="openPicker('merge_person', {{ person.id }}, null, '{{ person.name }}')"
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="m8 3 4 8 5-5 5 15H2L8 3z"/>
+          </svg>
+          Merge with Person...
+        </button>
+
+        <button 
+          type="button" 
+          class="btn" 
+          style="background: rgba(16, 185, 129, 0.15); border-color: rgba(16, 185, 129, 0.4); color: #6ee7b7; display: inline-flex; align-items: center; gap: 0.4rem;"
+          hx-post="/api/people/{{ person.id }}/autotag"
+          hx-target="#autotag-status-alert"
+          hx-swap="innerHTML"
+          title="Scan unassigned library faces for more photos of {{ person.name }}"
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"/>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+          Find More Photos
+        </button>
       </div>
+
+      <div id="autotag-status-alert" style="margin-top: 0.75rem;"></div>
 
       <p style="font-size: 0.875rem; color: var(--text-muted); margin-top: 0.5rem;">
         Appears in {{ total }} media item{{ 's' if total != 1 else '' }} in your gallery

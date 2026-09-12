@@ -1,0 +1,69 @@
+{% if targets and targets|length > 0 %}
+  {% for item in targets %}
+    <form 
+      class="target-picker-form"
+      {% if action_mode == 'move_face' %}
+        hx-post="/api/faces/{{ source_id }}/move" 
+        hx-target="#modal-container" 
+        hx-swap="innerHTML"
+        hx-on::after-request="closePicker()"
+      {% elif action_mode == 'merge_person' %}
+        hx-post="/api/people/{{ source_id }}/merge" 
+      {% elif action_mode == 'merge_cluster' %}
+        hx-post="/api/clusters/{{ source_id }}/merge" 
+      {% endif %}
+    >
+      {% if action_mode == 'move_face' %}
+        <input type="hidden" name="image_id" value="{{ image_id }}">
+        <input type="hidden" name="target_type" value="{{ item.type }}">
+        <input type="hidden" name="target_id" value="{{ item.id }}">
+      {% elif action_mode == 'merge_person' %}
+        <input type="hidden" name="target_type" value="{{ item.type }}">
+        <input type="hidden" name="target_id" value="{{ item.id }}">
+        <input type="hidden" name="target_person_id" value="{{ item.id }}">
+      {% elif action_mode == 'merge_cluster' %}
+        <input type="hidden" name="target_type" value="{{ item.type }}">
+        <input type="hidden" name="target_id" value="{{ item.id }}">
+      {% endif %}
+
+      <button type="submit" class="target-picker-card" title="Select {{ item.name }}">
+        <!-- Face Crop Thumbnail Avatar -->
+        <div class="target-picker-avatar">
+          {% if item.cover_face_id %}
+            <img src="/api/faces/{{ item.cover_face_id }}/crop" alt="{{ item.name }}" loading="lazy">
+          {% else %}
+            <div class="target-picker-avatar-placeholder">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <circle cx="12" cy="8" r="5"/>
+                <path d="M20 21a8 8 0 1 0-16 0"/>
+              </svg>
+            </div>
+          {% endif %}
+        </div>
+
+        <!-- Name -->
+        <div class="target-picker-card-name" title="{{ item.name }}">{{ item.name }}</div>
+
+        <!-- Badge -->
+        <div class="target-picker-card-badge {% if item.is_named %}is-named{% endif %}">
+          {{ 'Named Person' if item.is_named else ('Cluster #' ~ item.id) }}
+        </div>
+
+        <!-- Stats -->
+        <div class="target-picker-card-stats">
+          {{ item.photo_count }} photo{{ 's' if item.photo_count != 1 else '' }}
+          •
+          {{ item.face_count }} face{{ 's' if item.face_count != 1 else '' }}
+        </div>
+      </button>
+    </form>
+  {% endfor %}
+{% else %}
+  <div class="target-picker-empty">
+    <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="margin-bottom: 0.5rem; opacity: 0.6;">
+      <circle cx="11" cy="11" r="8"/>
+      <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+    </svg>
+    <div>No matching people or clusters found.</div>
+  </div>
+{% endif %}

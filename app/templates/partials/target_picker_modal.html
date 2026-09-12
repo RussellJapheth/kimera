@@ -1,0 +1,100 @@
+<div class="target-picker-modal" @click.stop>
+  <div class="target-picker-header">
+    <div>
+      <h3 style="margin: 0; font-size: 1.1rem; font-weight: 700; color: #fff;">
+        {% if action_mode == 'move_face' %}
+          Move Face to Person or Cluster
+        {% elif action_mode == 'merge_person' %}
+          Merge "{{ source_name }}" with Another Person
+        {% elif action_mode == 'merge_cluster' %}
+          Merge "{{ source_name }}" into Person or Cluster
+        {% else %}
+          Select Destination
+        {% endif %}
+      </h3>
+      <p style="margin: 0.25rem 0 0 0; font-size: 0.8125rem; color: var(--text-muted);">
+        Select target profile below or create a new person.
+      </p>
+    </div>
+    <button type="button" class="modal-close" @click="closePicker()" title="Close picker">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <line x1="18" y1="6" x2="6" y2="18"/>
+        <line x1="6" y1="6" x2="18" y2="18"/>
+      </svg>
+    </button>
+  </div>
+
+  <!-- Quick Create New Person Option -->
+  {% if action_mode == 'move_face' or action_mode == 'merge_cluster' %}
+  <div class="target-picker-create-box">
+    {% if action_mode == 'move_face' %}
+      <form 
+        hx-post="/api/faces/{{ source_id }}/move" 
+        hx-target="#modal-container" 
+        hx-swap="innerHTML"
+        hx-on::after-request="closePicker()"
+        style="display: flex; gap: 0.5rem; align-items: center;"
+      >
+        <input type="hidden" name="image_id" value="{{ image_id }}">
+        <input type="hidden" name="target_type" value="new">
+        <input 
+          type="text" 
+          name="new_name" 
+          placeholder="Create & move to new person name..." 
+          class="form-input" 
+          style="flex: 1; padding: 0.45rem 0.75rem; font-size: 0.875rem;"
+          required
+        >
+        <button type="submit" class="btn btn-primary" style="white-space: nowrap; padding: 0.45rem 0.85rem; font-size: 0.875rem;">
+          + Create & Move
+        </button>
+      </form>
+    {% elif action_mode == 'merge_cluster' %}
+      <form 
+        hx-post="/api/clusters/{{ source_id }}/name" 
+        hx-target="#cluster-name-section" 
+        hx-swap="outerHTML"
+        hx-on::after-request="closePicker()"
+        style="display: flex; gap: 0.5rem; align-items: center;"
+      >
+        <input 
+          type="text" 
+          name="name" 
+          placeholder="Create named person profile from this cluster..." 
+          class="form-input" 
+          style="flex: 1; padding: 0.45rem 0.75rem; font-size: 0.875rem;"
+          required
+        >
+        <button type="submit" class="btn btn-primary" style="white-space: nowrap; padding: 0.45rem 0.85rem; font-size: 0.875rem;">
+          Create Profile
+        </button>
+      </form>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <!-- Search / Filter Input with Live HTMX search -->
+  <div class="target-picker-search-box">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" stroke-width="2">
+      <circle cx="11" cy="11" r="8"/>
+      <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+    </svg>
+    <input 
+      type="text" 
+      name="search" 
+      placeholder="Search people and clusters by name or number..." 
+      class="form-input" 
+      style="border: none; background: transparent; padding: 0.25rem 0; font-size: 0.875rem; width: 100%; box-shadow: none;"
+      hx-get="/api/targets/items?mode={{ action_mode }}&source_id={{ source_id }}{% if image_id %}&image_id={{ image_id }}{% endif %}"
+      hx-trigger="keyup changed delay:150ms, search"
+      hx-target="#target-picker-list-items"
+      hx-swap="innerHTML"
+      autofocus
+    >
+  </div>
+
+  <!-- Target Grid with Face Crops -->
+  <div id="target-picker-list-items" class="target-picker-list">
+    {% include "partials/target_picker_items.html" %}
+  </div>
+</div>

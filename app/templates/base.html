@@ -17,6 +17,21 @@
   nextId: null,
   touchStartX: 0,
   touchStartY: 0,
+  activePicker: false,
+  openPicker(mode, sourceId, imageId = null, sourceName = '') {
+    this.activePicker = true;
+    let url = '/api/targets/picker?mode=' + encodeURIComponent(mode) + '&source_id=' + encodeURIComponent(sourceId);
+    if (imageId) url += '&image_id=' + encodeURIComponent(imageId);
+    if (sourceName) url += '&source_name=' + encodeURIComponent(sourceName);
+    htmx.ajax('GET', url, {target: '#picker-container', swap: 'innerHTML'});
+  },
+  closePicker() {
+    this.activePicker = false;
+    const container = document.getElementById('picker-container');
+    if (container) {
+      container.innerHTML = '';
+    }
+  },
   stopModalMedia() {
     const container = document.getElementById('modal-container');
     if (container) {
@@ -74,9 +89,9 @@
     }
   }
 }" 
-@keydown.escape.window="closeModal()"
-@keydown.left.window="if (activeModal && prevId) { openModal(prevId); }"
-@keydown.right.window="if (activeModal && nextId) { openModal(nextId); }"
+@keydown.escape.window="if (activePicker) { closePicker(); } else { closeModal(); }"
+@keydown.left.window="if (activeModal && !activePicker && prevId) { openModal(prevId); }"
+@keydown.right.window="if (activeModal && !activePicker && nextId) { openModal(nextId); }"
 @touchstart="handleTouchStart($event)"
 @touchend="handleTouchEnd($event)"
 >
@@ -152,6 +167,11 @@
     <div id="modal-container" style="width: 100%; display: flex; justify-content: center;">
       <!-- Dynamic Lightbox Content Injected by HTMX -->
     </div>
+  </div>
+
+  <!-- Visual Target Picker Container -->
+  <div x-show="activePicker" style="display: none; z-index: 2000;" class="modal-backdrop" @click.self="closePicker()">
+    <div id="picker-container" style="width: 100%; display: flex; justify-content: center; max-height: 100%; min-height: 0;"></div>
   </div>
 
   {% block scripts %}{% endblock %}

@@ -234,9 +234,36 @@
                       </div>
                     </div>
                     
-                    <button @click="editing = true" class="btn" style="padding: 0.2rem 0.4rem; font-size: 0.75rem;" title="Rename or assign name">
-                      Name
-                    </button>
+                    <div style="display: flex; align-items: center; gap: 0.3rem;">
+                      <button @click="editing = true" class="btn" style="padding: 0.2rem 0.4rem; font-size: 0.725rem;" title="Rename or assign name">
+                        Name
+                      </button>
+                      <button 
+                        type="button"
+                        class="btn btn-primary" 
+                        style="padding: 0.2rem 0.45rem; font-size: 0.725rem;" 
+                        title="Move to another person or cluster"
+                        @click="openPicker('move_face', {{ face.face_id }}, {{ image.id }}, '{{ face.person_name }}')"
+                      >
+                        Move
+                      </button>
+                      <button 
+                        type="button"
+                        class="btn" 
+                        style="padding: 0.2rem 0.35rem; font-size: 0.725rem; color: #f87171;" 
+                        title="Unlink / remove face from this person or cluster"
+                        hx-post="/api/faces/{{ face.face_id }}/unlink"
+                        hx-target="#modal-container"
+                        hx-swap="innerHTML"
+                        hx-vals='{"image_id": {{ image.id }}}'
+                        hx-confirm="Remove this face from this person/cluster?"
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path d="M18.36 6.64a9 9 0 1 1-12.73 0"/>
+                          <line x1="12" y1="2" x2="12" y2="12"/>
+                        </svg>
+                      </button>
+                    </div>
                   </div>
 
                   <!-- Quick Name Form -->

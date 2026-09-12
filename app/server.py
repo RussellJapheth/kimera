@@ -17,6 +17,7 @@ from fastapi.templating import Jinja2Templates
 
 from app.cache import ThumbnailCache
 from app.db import Database
+from app.recognition import MultiExemplarMatcher
 
 APP_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = APP_DIR / "templates"
@@ -48,6 +49,7 @@ class ScanManager:
         min_samples: int = 1,
         algorithm: str = "dbscan",
         min_interval_sec: float = 30.0,
+        match_threshold: Optional[float] = None,
     ) -> bool:
         with self._lock:
             if self.is_running:
@@ -64,7 +66,7 @@ class ScanManager:
 
         thread = threading.Thread(
             target=self._run_scan_thread,
-            args=(input_dir, conf_threshold, eps, min_samples, algorithm, min_interval_sec),
+            args=(input_dir, conf_threshold, eps, min_samples, algorithm, min_interval_sec, match_threshold),
             daemon=True,
         )
         thread.start()
@@ -89,6 +91,7 @@ class ScanManager:
         min_samples: int,
         algorithm: str,
         min_interval_sec: float = 30.0,
+        match_threshold: Optional[float] = None,
     ) -> None:
         from app.pipeline import run_pipeline
         try:
@@ -101,6 +104,7 @@ class ScanManager:
                 min_samples=min_samples,
                 clustering_algorithm=algorithm,
                 min_interval_sec=min_interval_sec,
+                match_threshold=match_threshold,
                 progress_callback=self._on_progress,
             )
             with self._lock:
@@ -343,8 +347,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
     @app.get("/settings", response_class=HTMLResponse)
     async def settings_view(request: Request):
         stats = db.get_summary_stats()
-        # Default scan folder if pictures directory exists
-        default_dir = str(Path("pictures").resolve()) if Path("pictures").exists() else str(Path.cwd())
+        saved_settings = db.get_all_settings()
+        default_dir = saved_settings.get("input_dir") or (str(Path("pictures").resolve()) if Path("pictures").exists() else str(Path.cwd()))
         cache_stats = cache.get_cache_stats()
         return templates.TemplateResponse(
             request=request,
@@ -352,12 +356,39 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             context={
                 "stats": stats,
                 "default_dir": default_dir,
+                "settings": saved_settings,
                 "cache_dir": str(cache.cache_dir),
                 "cache_stats": cache_stats,
                 "scan_mgr": scan_mgr,
                 "active_page": "settings",
             },
         )
+
+    @app.post("/api/settings/save", response_class=HTMLResponse)
+    async def save_settings_endpoint(
+        request: Request,
+        input_dir: str = Form(...),
+        conf_threshold: float = Form(0.5),
+        eps: float = Form(0.38),
+        min_samples: int = Form(1),
+        algorithm: str = Form("agglomerative"),
+        min_interval_sec: float = Form(30.0),
+        recognition_match_threshold: float = Form(0.38),
+    ):
+        db.set_settings({
+            "input_dir": input_dir,
+            "conf_threshold": str(conf_threshold),
+            "eps": str(eps),
+            "min_samples": str(min_samples),
+            "algorithm": algorithm,
+            "min_interval_sec": str(min_interval_sec),
+            "recognition_match_threshold": str(recognition_match_threshold),
+        })
+        return HTMLResponse("""
+            <div class="alert alert-success" style="background: rgba(16, 185, 129, 0.15); border: 1px solid #10b981; color: #6ee7b7; padding: 0.6rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.875rem;">
+                ✓ Settings saved successfully!
+            </div>
+        """)
 
     @app.post("/api/settings/cache", response_class=HTMLResponse)
     async def update_cache_settings(request: Request, cache_dir: str = Form(...)):
@@ -386,10 +417,11 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         request: Request,
         input_dir: str = Form(...),
         conf_threshold: float = Form(0.5),
-        eps: float = Form(0.65),
+        eps: float = Form(0.38),
         min_samples: int = Form(1),
-        algorithm: str = Form("dbscan"),
+        algorithm: str = Form("agglomerative"),
         min_interval_sec: float = Form(30.0),
+        recognition_match_threshold: float = Form(0.38),
     ):
         if not Path(input_dir).exists():
             return HTMLResponse(
@@ -398,6 +430,17 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
                 </div>"""
             )
 
+        # Save settings to DB
+        db.set_settings({
+            "input_dir": input_dir,
+            "conf_threshold": str(conf_threshold),
+            "eps": str(eps),
+            "min_samples": str(min_samples),
+            "algorithm": algorithm,
+            "min_interval_sec": str(min_interval_sec),
+            "recognition_match_threshold": str(recognition_match_threshold),
+        })
+
         scan_mgr.start_scan(
             input_dir=input_dir,
             conf_threshold=conf_threshold,
@@ -405,6 +448,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             min_samples=min_samples,
             algorithm=algorithm,
             min_interval_sec=min_interval_sec,
+            match_threshold=recognition_match_threshold,
         )
 
         return templates.TemplateResponse(
@@ -631,6 +675,223 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
               <button type="submit" class="btn btn-primary" style="white-space: nowrap;">Saved ✓</button>
             </form>
           </div>
+        """)
+
+    @app.get("/api/targets/picker", response_class=HTMLResponse)
+    async def get_targets_picker(
+        request: Request,
+        mode: str = Query("move_face"),
+        source_id: int = Query(...),
+        image_id: Optional[int] = Query(None),
+        source_name: Optional[str] = Query(""),
+    ):
+        all_targets = db.get_people(cluster_limit=50)
+        if mode == "merge_person":
+            targets = [t for t in all_targets if not (t["type"] == "person" and t["id"] == source_id)]
+        elif mode == "merge_cluster":
+            targets = [t for t in all_targets if not (t["type"] == "cluster" and t["id"] == source_id)]
+        else:
+            targets = all_targets
+
+        return templates.TemplateResponse(
+            request=request,
+            name="partials/target_picker_modal.html",
+            context={
+                "action_mode": mode,
+                "source_id": source_id,
+                "image_id": image_id,
+                "source_name": source_name,
+                "targets": targets,
+            },
+        )
+
+    @app.get("/api/targets/items", response_class=HTMLResponse)
+    async def get_targets_picker_items(
+        request: Request,
+        mode: str = Query("move_face"),
+        source_id: int = Query(...),
+        image_id: Optional[int] = Query(None),
+        search: Optional[str] = Query(None),
+    ):
+        search_term = (search or "").strip()
+        limit = 100 if search_term else 50
+        all_targets = db.get_people(search=search_term, cluster_limit=limit)
+        if mode == "merge_person":
+            targets = [t for t in all_targets if not (t["type"] == "person" and t["id"] == source_id)]
+        elif mode == "merge_cluster":
+            targets = [t for t in all_targets if not (t["type"] == "cluster" and t["id"] == source_id)]
+        else:
+            targets = all_targets
+
+        return templates.TemplateResponse(
+            request=request,
+            name="partials/target_picker_items.html",
+            context={
+                "action_mode": mode,
+                "source_id": source_id,
+                "image_id": image_id,
+                "targets": targets,
+            },
+        )
+
+    @app.post("/api/faces/{face_id}/move", response_class=HTMLResponse)
+    async def move_face_endpoint(
+        request: Request,
+        face_id: int,
+        image_id: int = Form(...),
+        target_type: str = Form(...),
+        target_id: Optional[int] = Form(None),
+        new_name: Optional[str] = Form(None),
+    ):
+        if target_type == "person":
+            db.move_face(face_id, target_person_id=target_id)
+        elif target_type == "cluster":
+            db.move_face(face_id, target_cluster_id=target_id)
+        elif target_type == "new" and new_name:
+            db.move_face(face_id, new_person_name=new_name)
+        elif target_type == "unlink":
+            db.move_face(face_id, unlink=True)
+
+        img_meta = db.get_image(image_id)
+        if not img_meta:
+            raise HTTPException(status_code=404, detail="Image not found")
+        img_meta["filename"] = Path(img_meta["file_path"]).name
+        return templates.TemplateResponse(
+            request=request,
+            name="partials/photo_modal.html",
+            context={"image": img_meta},
+        )
+
+    @app.post("/api/faces/{face_id}/unlink", response_class=HTMLResponse)
+    async def unlink_face_endpoint(
+        request: Request,
+        face_id: int,
+        image_id: int = Form(...),
+    ):
+        db.move_face(face_id, unlink=True)
+        img_meta = db.get_image(image_id)
+        if not img_meta:
+            raise HTTPException(status_code=404, detail="Image not found")
+        img_meta["filename"] = Path(img_meta["file_path"]).name
+        return templates.TemplateResponse(
+            request=request,
+            name="partials/photo_modal.html",
+            context={"image": img_meta},
+        )
+
+    @app.post("/api/people/{person_id}/merge")
+    async def merge_person_endpoint(
+        person_id: int,
+        target_person_id: Optional[int] = Form(None),
+        target_type: Optional[str] = Form("person"),
+        target_id: Optional[int] = Form(None),
+    ):
+        tgt_id = target_person_id if target_person_id is not None else target_id
+        if tgt_id is None:
+            return Response(status_code=400, content="Missing target ID")
+        if target_type == "cluster":
+            db.merge_person_into_cluster(source_person_id=person_id, target_cluster_id=tgt_id)
+            return Response(status_code=200, headers={"HX-Redirect": f"/?cluster_id={tgt_id}"})
+        else:
+            db.merge_people(source_person_id=person_id, target_person_id=tgt_id)
+            return Response(status_code=200, headers={"HX-Redirect": f"/person/{tgt_id}"})
+
+    @app.post("/api/clusters/{cluster_id}/merge")
+    async def merge_cluster_endpoint(
+        cluster_id: int,
+        target_type: str = Form(...),
+        target_id: int = Form(...),
+    ):
+        if target_type == "person":
+            db.merge_cluster_into_person(source_cluster_id=cluster_id, target_person_id=target_id)
+            return Response(status_code=200, headers={"HX-Redirect": f"/person/{target_id}"})
+        else:
+            db.merge_clusters(source_cluster_id=cluster_id, target_cluster_id=target_id)
+            return Response(status_code=200, headers={"HX-Redirect": f"/?cluster_id={target_id}"})
+
+    @app.post("/api/people/{person_id}/autotag", response_class=HTMLResponse)
+    async def autotag_person_endpoint(person_id: int):
+        p = db.get_person(person_id)
+        if not p:
+            raise HTTPException(status_code=404, detail="Person not found")
+
+        exemplars = db.get_person_exemplars(person_id, max_exemplars=5)
+        if not exemplars:
+            return HTMLResponse(f"""
+                <div class="alert alert-info" style="background: rgba(59, 130, 246, 0.15); border: 1px solid #3b82f6; color: #93c5fd; padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem;">
+                    No reference face embeddings found for {p['name']}. Assign at least one face first.
+                </div>
+            """)
+
+        unassigned_faces = db.get_unassigned_faces()
+        if not unassigned_faces:
+            return HTMLResponse("""
+                <div class="alert alert-info" style="background: rgba(59, 130, 246, 0.15); border: 1px solid #3b82f6; color: #93c5fd; padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem;">
+                    All faces in library are already assigned to people.
+                </div>
+            """)
+
+        threshold = float(db.get_setting("recognition_match_threshold", 0.38))
+        exclusions = db.get_person_exclusions()
+        matcher = MultiExemplarMatcher({person_id: exemplars})
+        matched_results = matcher.match_faces_batch(unassigned_faces, exclusions=exclusions, threshold=threshold)
+
+        matched_face_ids = list(matched_results.keys())
+        if matched_face_ids:
+            db.assign_faces_to_person(matched_face_ids, person_id)
+            return Response(status_code=200, headers={"HX-Refresh": "true"})
+
+        return HTMLResponse(f"""
+            <div class="alert alert-info" style="background: rgba(59, 130, 246, 0.15); border: 1px solid #3b82f6; color: #93c5fd; padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem;">
+                Scanned {len(unassigned_faces)} unassigned faces: 0 matched {p['name']} (threshold: {threshold:.2f}).
+            </div>
+        """)
+
+    @app.post("/api/people/autotag-all", response_class=HTMLResponse)
+    async def autotag_all_people_endpoint():
+        all_exemplars = db.get_all_person_exemplars(max_exemplars=5)
+        if not all_exemplars:
+            return HTMLResponse("""
+                <div class="alert alert-info" style="background: rgba(59, 130, 246, 0.15); border: 1px solid #3b82f6; color: #93c5fd; padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem;">
+                    No named people found in library. Name at least one person first.
+                </div>
+            """)
+
+        unassigned_faces = db.get_unassigned_faces()
+        if not unassigned_faces:
+            return HTMLResponse("""
+                <div class="alert alert-info" style="background: rgba(59, 130, 246, 0.15); border: 1px solid #3b82f6; color: #93c5fd; padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem;">
+                    All faces in library are already assigned to people!
+                </div>
+            """)
+
+        threshold = float(db.get_setting("recognition_match_threshold", 0.38))
+        exclusions = db.get_person_exclusions()
+        matcher = MultiExemplarMatcher(all_exemplars)
+        matched_results = matcher.match_faces_batch(unassigned_faces, exclusions=exclusions, threshold=threshold)
+
+        if not matched_results:
+            return HTMLResponse(f"""
+                <div class="alert alert-info" style="background: rgba(59, 130, 246, 0.15); border: 1px solid #3b82f6; color: #93c5fd; padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem;">
+                    Scanned {len(unassigned_faces)} unassigned faces: 0 matches found for named people (threshold: {threshold:.2f}).
+                </div>
+            """)
+
+        person_to_faces: Dict[int, List[int]] = {}
+        for f_id, (p_id, _dist) in matched_results.items():
+            if p_id not in person_to_faces:
+                person_to_faces[p_id] = []
+            person_to_faces[p_id].append(f_id)
+
+        for p_id, f_ids in person_to_faces.items():
+            db.assign_faces_to_person(f_ids, p_id)
+
+        total_matched = len(matched_results)
+        num_people_matched = len(person_to_faces)
+        return HTMLResponse(f"""
+            <div class="alert alert-success" style="background: rgba(16, 185, 129, 0.15); border: 1px solid #10b981; color: #6ee7b7; padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem;">
+                ✓ Auto-tagged {total_matched} faces across {num_people_matched} named people!
+            </div>
         """)
 
     @app.post("/api/people/merge")

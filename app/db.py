@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 import numpy as np
 
 
@@ -61,6 +61,20 @@ class Database:
                     FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE,
                     FOREIGN KEY (person_id) REFERENCES people(id) ON DELETE SET NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS person_exclusions (
+                    face_id INTEGER NOT NULL,
+                    person_id INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (face_id, person_id),
+                    FOREIGN KEY (face_id) REFERENCES faces(id) ON DELETE CASCADE,
+                    FOREIGN KEY (person_id) REFERENCES people(id) ON DELETE CASCADE
+                );
             """)
 
             # 2. Run column migrations for older database schemas
@@ -92,6 +106,8 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_faces_image_id ON faces(image_id);
                 CREATE INDEX IF NOT EXISTS idx_faces_cluster_id ON faces(cluster_id);
                 CREATE INDEX IF NOT EXISTS idx_faces_person_id ON faces(person_id);
+                CREATE INDEX IF NOT EXISTS idx_person_exclusions_face ON person_exclusions(face_id);
+                CREATE INDEX IF NOT EXISTS idx_person_exclusions_person ON person_exclusions(person_id);
             """)
 
             # 4. Migrate and collapse any legacy video keyframe entries (e.g. "...#t=1.23s") to single clean video files
@@ -581,7 +597,7 @@ class Database:
             "direct_images_count": direct_images_count,
         }
 
-    def get_people(self, search: Optional[str] = None) -> List[Dict[str, Any]]:
+    def get_people(self, search: Optional[str] = None, cluster_limit: Optional[int] = None) -> List[Dict[str, Any]]:
         """Retrieve all people and unnamed clusters with face count, photo count, and cover face ID."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -611,7 +627,8 @@ class Database:
                 })
 
             # 2. Then include unnamed clusters that have cluster_id >= 0 but no person_id
-            cluster_query = """
+            cluster_limit_sql = f"LIMIT {int(cluster_limit)}" if cluster_limit else ""
+            cluster_query = f"""
                 SELECT f.cluster_id,
                        COUNT(DISTINCT f.id) as face_count,
                        COUNT(DISTINCT f.image_id) as photo_count,
@@ -620,6 +637,7 @@ class Database:
                 WHERE f.cluster_id >= 0 AND f.person_id IS NULL
                 GROUP BY f.cluster_id
                 ORDER BY photo_count DESC, face_count DESC
+                {cluster_limit_sql}
             """
             cursor.execute(cluster_query)
             for r in cursor.fetchall():
@@ -636,7 +654,7 @@ class Database:
 
             if search:
                 s = search.lower().strip()
-                people = [p for p in people if s in p["name"].lower()]
+                people = [p for p in people if s in p["name"].lower() or (p["type"] == "cluster" and s in str(p["id"]))]
 
             return people
 
@@ -680,15 +698,13 @@ class Database:
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
-            # If face_id is provided, resolve cluster_id and existing person_id
+            # If face_id is provided, resolve cluster_id if not given
             if face_id:
-                cursor.execute("SELECT cluster_id, person_id FROM faces WHERE id = ?", (face_id,))
+                cursor.execute("SELECT cluster_id FROM faces WHERE id = ?", (face_id,))
                 fr = cursor.fetchone()
                 if fr:
                     if cluster_id is None and fr["cluster_id"] is not None and fr["cluster_id"] >= 0:
                         cluster_id = fr["cluster_id"]
-                    if person_id is None and fr["person_id"] is not None:
-                        person_id = fr["person_id"]
 
             if person_id:
                 # Rename existing person record
@@ -729,8 +745,100 @@ class Database:
             return
         with self._get_connection() as conn:
             cursor = conn.cursor()
+            # Ensure target person has a cover face if currently None
+            cursor.execute("SELECT cover_face_id FROM people WHERE id = ?", (target_person_id,))
+            target_row = cursor.fetchone()
+            if target_row and not target_row["cover_face_id"]:
+                cursor.execute("SELECT cover_face_id FROM people WHERE id = ?", (source_person_id,))
+                src_row = cursor.fetchone()
+                if src_row and src_row["cover_face_id"]:
+                    cursor.execute("UPDATE people SET cover_face_id = ? WHERE id = ?", (src_row["cover_face_id"], target_person_id))
+
             cursor.execute("UPDATE faces SET person_id = ? WHERE person_id = ?", (target_person_id, source_person_id))
             cursor.execute("DELETE FROM people WHERE id = ?", (source_person_id,))
+
+    def merge_person_into_cluster(self, source_person_id: int, target_cluster_id: int) -> None:
+        """Merge all faces from source_person into target_cluster, then delete source_person."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE faces SET cluster_id = ?, person_id = NULL WHERE person_id = ?", (target_cluster_id, source_person_id))
+            cursor.execute("DELETE FROM people WHERE id = ?", (source_person_id,))
+
+    def merge_cluster_into_person(self, source_cluster_id: int, target_person_id: int) -> None:
+        """Merge all faces from source_cluster into target_person."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE faces SET person_id = ? WHERE cluster_id = ?", (target_person_id, source_cluster_id))
+
+    def merge_clusters(self, source_cluster_id: int, target_cluster_id: int) -> None:
+        """Merge all faces from source_cluster into target_cluster."""
+        if source_cluster_id == target_cluster_id:
+            return
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE faces SET cluster_id = ?, person_id = NULL WHERE cluster_id = ?", (target_cluster_id, source_cluster_id))
+
+    def move_face(
+        self,
+        face_id: int,
+        target_person_id: Optional[int] = None,
+        target_cluster_id: Optional[int] = None,
+        new_person_name: Optional[str] = None,
+        unlink: bool = False,
+    ) -> Optional[int]:
+        """
+        Move a face to a target person, cluster, new person, or unlink it.
+        Returns the resulting person_id if assigned to a person, else None.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            # Fetch current person_id before moving/unlinking
+            cursor.execute("SELECT person_id FROM faces WHERE id = ?", (face_id,))
+            row = cursor.fetchone()
+            current_person_id = row["person_id"] if row else None
+
+            if unlink:
+                if current_person_id is not None:
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO person_exclusions (face_id, person_id) VALUES (?, ?)",
+                        (face_id, current_person_id),
+                    )
+                cursor.execute("UPDATE faces SET person_id = NULL, cluster_id = -1 WHERE id = ?", (face_id,))
+                return None
+
+            if new_person_name and new_person_name.strip():
+                name = new_person_name.strip()
+                cursor.execute("SELECT id FROM people WHERE LOWER(TRIM(name)) = LOWER(?)", (name,))
+                existing = cursor.fetchone()
+                if existing:
+                    target_person_id = int(existing["id"])
+                else:
+                    cursor.execute("INSERT INTO people (name, cover_face_id) VALUES (?, ?)", (name, face_id))
+                    target_person_id = int(cursor.lastrowid)
+
+            if target_person_id is not None:
+                # If moving away from a previous person, record exclusion for old person
+                if current_person_id is not None and current_person_id != target_person_id:
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO person_exclusions (face_id, person_id) VALUES (?, ?)",
+                        (face_id, current_person_id),
+                    )
+                # Remove any existing exclusion for target person
+                cursor.execute(
+                    "DELETE FROM person_exclusions WHERE face_id = ? AND person_id = ?",
+                    (face_id, target_person_id),
+                )
+                cursor.execute("UPDATE faces SET person_id = ? WHERE id = ?", (target_person_id, face_id))
+                return target_person_id
+            elif target_cluster_id is not None:
+                if current_person_id is not None:
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO person_exclusions (face_id, person_id) VALUES (?, ?)",
+                        (face_id, current_person_id),
+                    )
+                cursor.execute("UPDATE faces SET cluster_id = ?, person_id = NULL WHERE id = ?", (target_cluster_id, face_id))
+                return None
+            return None
 
     def get_face(self, face_id: int) -> Optional[Dict[str, Any]]:
         """Retrieve single face detection info."""
@@ -893,3 +1001,160 @@ class Database:
             conn.execute("DELETE FROM faces;")
             conn.execute("DELETE FROM people;")
             conn.execute("DELETE FROM images;")
+
+    def get_setting(self, key: str, default: Any = None) -> Any:
+        """Retrieve a stored setting value by key."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT value FROM settings WHERE key = ?", (str(key),))
+            row = cursor.fetchone()
+            if row is not None:
+                return row["value"]
+            return default
+
+    def set_setting(self, key: str, value: Any) -> None:
+        """Save or update a setting value by key."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (str(key), str(value))
+            )
+
+    def get_all_settings(self) -> Dict[str, str]:
+        """Retrieve all stored settings as a dictionary."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT key, value FROM settings")
+            return {r["key"]: r["value"] for r in cursor.fetchall()}
+
+    def set_settings(self, settings_dict: Dict[str, Any]) -> None:
+        """Batch save multiple settings."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            for k, v in settings_dict.items():
+                if v is not None:
+                    cursor.execute(
+                        "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        (str(k), str(v))
+                    )
+
+    def add_person_exclusion(self, face_id: int, person_id: int) -> None:
+        """Record a hard cannot-link exclusion between a face and a person."""
+        with self._get_connection() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO person_exclusions (face_id, person_id) VALUES (?, ?)",
+                (int(face_id), int(person_id))
+            )
+
+    def remove_person_exclusion(self, face_id: int, person_id: int) -> None:
+        """Remove a cannot-link exclusion."""
+        with self._get_connection() as conn:
+            conn.execute(
+                "DELETE FROM person_exclusions WHERE face_id = ? AND person_id = ?",
+                (int(face_id), int(person_id))
+            )
+
+    def get_person_exclusions(self) -> Dict[int, Set[int]]:
+        """Retrieve mapping of {face_id: set_of_excluded_person_ids}."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT face_id, person_id FROM person_exclusions")
+            exclusions: Dict[int, Set[int]] = {}
+            for r in cursor.fetchall():
+                f_id = int(r["face_id"])
+                p_id = int(r["person_id"])
+                if f_id not in exclusions:
+                    exclusions[f_id] = set()
+                exclusions[f_id].add(p_id)
+            return exclusions
+
+    def get_all_person_exemplars(self, max_exemplars: int = 5) -> Dict[int, List[np.ndarray]]:
+        """
+        Retrieve multi-exemplar embeddings for all named people in the database.
+        Returns {person_id: [exemplar_vec1, exemplar_vec2, ...]}.
+        """
+        from app.recognition import select_k_medoids
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT person_id, embedding
+                FROM faces
+                WHERE person_id IS NOT NULL
+                ORDER BY person_id ASC, id ASC
+            """)
+            person_embeddings: Dict[int, List[np.ndarray]] = {}
+            for r in cursor.fetchall():
+                p_id = int(r["person_id"])
+                emb = self.deserialize_embedding(r["embedding"])
+                if p_id not in person_embeddings:
+                    person_embeddings[p_id] = []
+                person_embeddings[p_id].append(emb)
+
+            exemplars: Dict[int, List[np.ndarray]] = {}
+            for p_id, embs in person_embeddings.items():
+                exemplars[p_id] = select_k_medoids(embs, k=max_exemplars)
+
+            return exemplars
+
+    def get_person_exemplars(self, person_id: int, max_exemplars: int = 5) -> List[np.ndarray]:
+        """Retrieve multi-exemplar embeddings for a single person."""
+        from app.recognition import select_k_medoids
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT embedding
+                FROM faces
+                WHERE person_id = ?
+                ORDER BY id ASC
+            """, (int(person_id),))
+            embs = [self.deserialize_embedding(r["embedding"]) for r in cursor.fetchall()]
+            return select_k_medoids(embs, k=max_exemplars)
+
+    def get_unassigned_faces(self) -> List[Dict[str, Any]]:
+        """Retrieve all faces that currently have no person_id assigned."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT f.id, f.image_id, f.box_x1, f.box_y1, f.box_x2, f.box_y2,
+                       f.confidence, f.embedding, f.cluster_id, i.file_path
+                FROM faces f
+                JOIN images i ON f.image_id = i.id
+                WHERE f.person_id IS NULL
+                ORDER BY f.id ASC
+            """)
+            rows = cursor.fetchall()
+            results = []
+            for r in rows:
+                results.append({
+                    "id": int(r["id"]),
+                    "image_id": int(r["image_id"]),
+                    "bbox": (int(r["box_x1"]), int(r["box_y1"]), int(r["box_x2"]), int(r["box_y2"])),
+                    "confidence": float(r["confidence"]),
+                    "embedding": self.deserialize_embedding(r["embedding"]),
+                    "cluster_id": int(r["cluster_id"]),
+                    "person_id": None,
+                    "file_path": r["file_path"],
+                })
+            return results
+
+    def assign_faces_to_person(self, face_ids: List[int], person_id: int) -> None:
+        """Batch assign a list of face IDs to a person."""
+        if not face_ids:
+            return
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            placeholders = ",".join("?" for _ in face_ids)
+            cursor.execute(
+                f"UPDATE faces SET person_id = ? WHERE id IN ({placeholders})",
+                [int(person_id)] + [int(fid) for fid in face_ids]
+            )
+            # Clear any exclusions for this person
+            cursor.execute(
+                f"DELETE FROM person_exclusions WHERE person_id = ? AND face_id IN ({placeholders})",
+                [int(person_id)] + [int(fid) for fid in face_ids]
+            )
+
+

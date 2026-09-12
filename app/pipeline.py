@@ -15,6 +15,7 @@ from tqdm import tqdm
 from app.clustering import cluster_embeddings
 from app.db import Database
 from app.models import FaceDetector, FaceEmbedder
+from app.recognition import MultiExemplarMatcher
 from app.scanner import (
     compute_quick_hash,
     extract_video_keyframes,
@@ -137,18 +138,20 @@ def run_pipeline(
     db_path: Path | str = "face_clusters.db",
     cache_dir: Optional[Path | str] = None,
     conf_threshold: float = 0.5,
-    eps: float = 0.65,
+    eps: float = 0.38,
     min_samples: int = 1,
-    clustering_algorithm: str = "dbscan",
+    clustering_algorithm: str = "agglomerative",
     export_dir: Optional[Path | str] = None,
     scene_threshold: float = 0.35,
     min_interval_sec: float = 30.0,
     max_interval_sec: float = 90.0,
+    match_threshold: Optional[float] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     """
     Run high-performance incremental face scanning, detection, embedding, and clustering.
     Uses multi-threaded parallel pre-filtering and background image decode prefetching.
+    Includes multi-exemplar supervised matching for named people followed by unsupervised clustering.
     """
     db = Database(db_path)
     media_paths = scan_media_paths(input_dir)
@@ -363,50 +366,87 @@ def run_pipeline(
         finally:
             stop_event.set()
 
-    # 4. Perform clustering across all faces in library
-    notify_progress("Clustering face embeddings into people...", 95, total_media, total_media)
-    all_faces = db.get_all_unclustered_or_all_faces()
-    if all_faces:
-        all_face_ids = [f["id"] for f in all_faces]
-        all_embeddings = [f["embedding"] for f in all_faces]
+    # 4. Perform Two-Stage Identification & Clustering
+    # Stage 4A: Supervised matching against all verified person exemplars (already-named & newly assigned)
+    notify_progress("Matching unassigned faces against named people...", 93, total_media, total_media)
+    effective_match_threshold = (
+        float(match_threshold)
+        if match_threshold is not None
+        else float(db.get_setting("recognition_match_threshold", eps))
+    )
+
+    person_exemplars = db.get_all_person_exemplars(max_exemplars=5)
+    unassigned_faces = db.get_unassigned_faces()
+
+    if person_exemplars and unassigned_faces:
+        matcher = MultiExemplarMatcher(person_exemplars)
+        exclusions = db.get_person_exclusions()
+        matched_results = matcher.match_faces_batch(
+            unassigned_faces,
+            exclusions=exclusions,
+            threshold=effective_match_threshold,
+        )
+        if matched_results:
+            # Group by person_id for batch DB update
+            person_to_faces: Dict[int, List[int]] = {}
+            for f_id, (p_id, _dist) in matched_results.items():
+                if p_id not in person_to_faces:
+                    person_to_faces[p_id] = []
+                person_to_faces[p_id].append(f_id)
+
+            for p_id, f_ids in person_to_faces.items():
+                db.assign_faces_to_person(f_ids, p_id)
+
+    # Stage 4B: Unsupervised clustering on remaining unassigned faces
+    notify_progress("Clustering remaining unassigned faces...", 96, total_media, total_media)
+    remaining_unassigned = db.get_unassigned_faces()
+    if remaining_unassigned:
+        all_unassigned_ids = [f["id"] for f in remaining_unassigned]
+        all_unassigned_embeddings = [f["embedding"] for f in remaining_unassigned]
         cluster_labels = cluster_embeddings(
-            embeddings=all_embeddings,
+            embeddings=all_unassigned_embeddings,
             eps=eps,
             min_samples=min_samples,
             algorithm=clustering_algorithm,
         )
-        db.update_face_clusters(all_face_ids, cluster_labels)
+        db.update_face_clusters(all_unassigned_ids, cluster_labels)
 
-        # Export cutouts if requested
-        if export_dir:
-            import cv2
-            out_root = Path(export_dir)
-            import shutil
-            if out_root.exists():
-                shutil.rmtree(out_root)
-            out_root.mkdir(parents=True, exist_ok=True)
+    # Export cutouts if requested
+    if export_dir:
+        import cv2
+        out_root = Path(export_dir)
+        import shutil
+        if out_root.exists():
+            shutil.rmtree(out_root)
+        out_root.mkdir(parents=True, exist_ok=True)
 
-            unique_clusters = sorted([c for c in set(cluster_labels) if c >= 0])
-            cluster_name_map = {c: f"person_{i + 1}" for i, c in enumerate(unique_clusters)}
-            cluster_name_map[-1] = "unclustered"
+        all_faces = db.get_all_unclustered_or_all_faces()
+        for face_rec in all_faces:
+            p_id = face_rec["person_id"]
+            c_id = face_rec["cluster_id"]
+            if p_id is not None:
+                p_info = db.get_person(p_id)
+                folder_name = f"person_{p_info['name']}" if p_info else f"person_id_{p_id}"
+            elif c_id >= 0:
+                folder_name = f"cluster_{c_id}"
+            else:
+                folder_name = "unclustered"
 
-            for face_rec, cluster_id in zip(all_faces, cluster_labels):
-                person_folder = cluster_name_map.get(cluster_id, f"person_{cluster_id + 1}")
-                dest_dir = out_root / person_folder
-                dest_dir.mkdir(parents=True, exist_ok=True)
+            dest_dir = out_root / folder_name
+            dest_dir.mkdir(parents=True, exist_ok=True)
 
-                img_rgb = load_image_rgb(face_rec["file_path"])
-                if img_rgb is not None:
-                    h, w, _ = img_rgb.shape
-                    x1, y1, x2, y2 = face_rec["bbox"]
-                    bw, bh = x2 - x1, y2 - y1
-                    mx, my = int(bw * 0.15), int(bh * 0.15)
-                    cx1, cy1 = max(0, x1 - mx), max(0, y1 - my)
-                    cx2, cy2 = min(w, x2 + mx), min(h, y2 + my)
+            img_rgb = load_image_rgb(face_rec["file_path"])
+            if img_rgb is not None:
+                h, w, _ = img_rgb.shape
+                x1, y1, x2, y2 = face_rec["bbox"]
+                bw, bh = x2 - x1, y2 - y1
+                mx, my = int(bw * 0.15), int(bh * 0.15)
+                cx1, cy1 = max(0, x1 - mx), max(0, y1 - my)
+                cx2, cy2 = min(w, x2 + mx), min(h, y2 + my)
 
-                    crop_rgb = img_rgb[cy1:cy2, cx1:cx2]
-                    crop_bgr = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2BGR)
-                    out_name = f"{Path(face_rec['file_path']).stem}_face{face_rec['id']}.jpg"
-                    cv2.imwrite(str(dest_dir / out_name), crop_bgr)
+                crop_rgb = img_rgb[cy1:cy2, cx1:cx2]
+                crop_bgr = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2BGR)
+                out_name = f"{Path(face_rec['file_path']).stem}_face{face_rec['id']}.jpg"
+                cv2.imwrite(str(dest_dir / out_name), crop_bgr)
 
     return db.get_summary_stats()
