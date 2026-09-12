@@ -1,20 +1,31 @@
-<div class="photo-card {% if image.is_favorite %}is-fav{% endif %} {% if image.is_video %}is-video{% endif %}" id="photo-card-{{ image.id }}">
+<div class="photo-card {% if image.is_favorite %}is-fav{% endif %} {% if image.is_video %}is-video{% endif %}" :class="{ 'is-selected': isSelected({{ image.id }}) }" id="photo-card-{{ image.id }}">
   <img src="/api/photos/{{ image.id }}/thumbnail" alt="{{ image.filename }}" loading="lazy" @click="openModal({{ image.id }})">
   
   {% if image.is_video %}
-    <div class="video-play-indicator" @click="openModal({{ image.id }})" title="Play Video">
+    <div class="video-play-indicator" @click="openModal({{ image.id }})" title="Play Video{% if image.formatted_duration %} ({{ image.formatted_duration }}){% endif %}">
       <div class="video-play-icon">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
           <polygon points="6 4 20 12 6 20 6 4"/>
         </svg>
       </div>
-      <span class="video-badge-label">Video</span>
+      <span class="video-badge-label">{% if image.formatted_duration %}{{ image.formatted_duration }}{% else %}Video{% endif %}</span>
     </div>
   {% endif %}
 
   <div class="card-overlay">
     <div class="card-top">
-      <div style="display: flex; align-items: center; gap: 0.35rem;">
+      <div style="display: flex; align-items: center; gap: 0.4rem;">
+        <!-- Card Select Checkbox -->
+        <label class="card-select-label" @click.stop title="Select item">
+          <input 
+            type="checkbox" 
+            class="card-select-checkbox" 
+            :checked="isSelected({{ image.id }})" 
+            @change="toggleSelect({{ image.id }})"
+          >
+          <span class="card-select-custom"></span>
+        </label>
+
         {% if image.face_count > 0 %}
           <span class="face-badge" title="{{ image.face_count }} face(s) detected">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
@@ -41,7 +52,12 @@
     </div>
 
     <div class="card-bottom" @click="openModal({{ image.id }})">
-      <span class="card-info">{{ image.filename }}</span>
+      <div class="card-meta-line">
+        <span class="card-info" title="{{ image.filename }}">{{ image.filename }}</span>
+        {% if image.formatted_size and image.formatted_size != '0 B' %}
+          <span class="card-size-pill">{{ image.formatted_size }}</span>
+        {% endif %}
+      </div>
     </div>
   </div>
 </div>

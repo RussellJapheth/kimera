@@ -204,6 +204,26 @@ class ThumbnailCache:
             except Exception:
                 pass
 
+    def invalidate_media_cache(self, media_path: str | Path) -> None:
+        """Invalidate all thumbnails and transcoded video streams for a media file."""
+        self.invalidate_thumbnail(media_path)
+        src = Path(media_path)
+        file_hash = self._path_hash(str(src.resolve()))
+        # Check sharded transcoded dir
+        shard_folder = self._shard_dir(self.transcoded_dir, file_hash)
+        if shard_folder.exists():
+            for vid in shard_folder.glob(f"{file_hash}*.mp4"):
+                try:
+                    vid.unlink(missing_ok=True)
+                except Exception:
+                    pass
+        # Check legacy flat transcoded dir
+        for vid in self.transcoded_dir.glob(f"{file_hash}*.mp4"):
+            try:
+                vid.unlink(missing_ok=True)
+            except Exception:
+                pass
+
     def _face_shard_dir(self, face_id: int) -> Path:
         """Return 2-tier sharded directory for face crops."""
         face_key = f"{face_id:08d}"

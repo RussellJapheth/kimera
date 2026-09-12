@@ -60,6 +60,24 @@ def is_video_file(path: Path | str) -> bool:
     return Path(path).suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS
 
 
+def get_video_duration(video_path: Path | str) -> float:
+    """
+    Quickly retrieve video duration in seconds via OpenCV VideoCapture metadata.
+    """
+    try:
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            return 0.0
+        fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+        frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0
+        cap.release()
+        if fps > 0 and frame_count > 0:
+            return float(frame_count / fps)
+        return 0.0
+    except Exception:
+        return 0.0
+
+
 def is_media_file(path: Path | str) -> bool:
     """Check if a file has a supported image or video extension."""
     return Path(path).suffix.lower() in SUPPORTED_EXTENSIONS
@@ -110,7 +128,7 @@ def load_image_rgb(image_path: Path | str) -> Optional[np.ndarray]:
 def extract_video_keyframes(
     video_path: Path | str,
     scene_threshold: float = 0.35,
-    min_interval_sec: float = 30.0,
+    min_interval_sec: float = 60.0,
     max_interval_sec: float = 90.0,
 ) -> Generator[VideoKeyframe, None, None]:
     """

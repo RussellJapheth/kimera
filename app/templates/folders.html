@@ -55,6 +55,10 @@
         Name {% if sort_by == 'name' %}{{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}
       </a>
       <span style="color: var(--border-subtle);">|</span>
+      <a href="/folders?path={{ folder_info.current_folder }}&sort=size&order={% if sort_by == 'size' and sort_order == 'desc' %}asc{% else %}desc{% endif %}" class="sort-link {% if sort_by == 'size' %}active{% endif %}">
+        Size {% if sort_by == 'size' %}{{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}
+      </a>
+      <span style="color: var(--border-subtle);">|</span>
       <a href="/folders?path={{ folder_info.current_folder }}&sort=faces&order={% if sort_by == 'faces' and sort_order == 'desc' %}asc{% else %}desc{% endif %}" class="sort-link {% if sort_by == 'faces' %}active{% endif %}">
         Faces {% if sort_by == 'faces' %}{{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}
       </a>

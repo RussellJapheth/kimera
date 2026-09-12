@@ -19,6 +19,7 @@ from app.recognition import MultiExemplarMatcher
 from app.scanner import (
     compute_quick_hash,
     extract_video_keyframes,
+    get_video_duration,
     is_video_file,
     load_image_rgb,
     scan_media_paths,
@@ -137,13 +138,13 @@ def run_pipeline(
     input_dir: Path | str,
     db_path: Path | str = "face_clusters.db",
     cache_dir: Optional[Path | str] = None,
-    conf_threshold: float = 0.5,
-    eps: float = 0.38,
+    conf_threshold: float = 0.60,
+    eps: float = 0.43,
     min_samples: int = 1,
     clustering_algorithm: str = "agglomerative",
     export_dir: Optional[Path | str] = None,
     scene_threshold: float = 0.35,
-    min_interval_sec: float = 30.0,
+    min_interval_sec: float = 60.0,
     max_interval_sec: float = 90.0,
     match_threshold: Optional[float] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
@@ -277,6 +278,7 @@ def run_pipeline(
                     if task.is_video:
                         video_image_id = task.image_id
                         vid_w, vid_h = 0, 0
+                        vid_dur = get_video_duration(task.path)
                         for kf in extract_video_keyframes(
                             task.path,
                             scene_threshold=scene_threshold,
@@ -292,6 +294,7 @@ def run_pipeline(
                                     file_size=task.file_size,
                                     mtime=task.mtime,
                                     content_hash=task.content_hash,
+                                    duration=vid_dur,
                                 )
 
                             detected_faces = det.detect(kf.frame_rgb)
@@ -314,6 +317,7 @@ def run_pipeline(
                                 file_size=task.file_size,
                                 mtime=task.mtime,
                                 content_hash=task.content_hash,
+                                duration=vid_dur,
                             )
                         else:
                             db.update_image_meta(
@@ -323,6 +327,7 @@ def run_pipeline(
                                 content_hash=task.content_hash,
                                 width=vid_w,
                                 height=vid_h,
+                                duration=vid_dur,
                             )
                     else:
                         # Image file

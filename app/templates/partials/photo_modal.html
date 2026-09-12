@@ -155,11 +155,13 @@
   </div>
 
   <!-- Sidebar -->
-  <div class="modal-sidebar">
+  <div class="modal-sidebar" @touchstart.stop @touchend.stop>
     <div>
       <div class="modal-sidebar-header">
-        <div style="font-weight: 600; font-size: 1rem; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{ image.filename }}">
-          {{ image.filename }}
+        <div style="font-weight: 600; font-size: 1rem; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+          <a href="/folders?path={{ image.parent_folder }}" class="modal-filename-link" title="Open folder: {{ image.parent_folder }}">
+            {{ image.filename }}
+          </a>
         </div>
         <div style="display: flex; align-items: center; gap: 0.5rem;">
           <button 
@@ -184,16 +186,155 @@
         </div>
       </div>
 
+      <!-- File Operations Action Bar -->
+      <div class="modal-file-actions" style="display: flex; align-items: center; gap: 0.4rem; margin-bottom: 1rem; flex-wrap: wrap;" x-data="{
+        renaming: false,
+        newName: '{{ image.filename }}',
+        async performRename() {
+          if (!this.newName.trim() || this.newName === '{{ image.filename }}') {
+            this.renaming = false;
+            return;
+          }
+          try {
+            const resp = await fetch('/api/files/rename', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({ image_id: {{ image.id }}, new_name: this.newName.trim() })
+            });
+            const data = await resp.json();
+            if (resp.ok) {
+              window.openModal({{ image.id }});
+            } else {
+              alert(data.detail || 'Failed to rename');
+            }
+          } catch(e) {
+            alert('Error: ' + e.message);
+          }
+          this.renaming = false;
+        },
+        async deleteSingle() {
+          if (!confirm('Are you sure you want to permanently delete {{ image.filename }} from disk?')) return;
+          try {
+            const resp = await fetch('/api/files/delete', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({ image_ids: [{{ image.id }}] })
+            });
+            if (resp.ok) {
+              const card = document.getElementById('photo-card-{{ image.id }}');
+              if (card) card.remove();
+              {% if next_id %}
+                window.openModal({{ next_id }});
+              {% elif prev_id %}
+                window.openModal({{ prev_id }});
+              {% else %}
+                window.closeModal();
+                window.location.reload();
+              {% endif %}
+            } else {
+              alert('Failed to delete file');
+            }
+          } catch(e) {
+            alert('Error: ' + e.message);
+          }
+        }
+      }">
+        <div x-show="!renaming" style="display: flex; align-items: center; gap: 0.35rem; width: 100%; flex-wrap: wrap;">
+          <button type="button" class="btn" style="padding: 0.3rem 0.6rem; font-size: 0.75rem; display: inline-flex; align-items: center; gap: 0.3rem;" @click="renaming = true" title="Rename file">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 20h9"/>
+              <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>
+            </svg>
+            Rename
+          </button>
+          
+          <button type="button" class="btn" style="padding: 0.3rem 0.6rem; font-size: 0.75rem; display: inline-flex; align-items: center; gap: 0.3rem;" @click="openFolderPicker('move', '{{ image.id }}')" title="Move to another folder">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+            </svg>
+            Move
+          </button>
+
+          <button type="button" class="btn" style="padding: 0.3rem 0.6rem; font-size: 0.75rem; display: inline-flex; align-items: center; gap: 0.3rem;" @click="openFolderPicker('copy', '{{ image.id }}')" title="Copy to folder">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
+              <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
+            </svg>
+            Copy
+          </button>
+
+          <a href="/api/photos/{{ image.id }}/raw" download="{{ image.filename }}" class="btn" style="padding: 0.3rem 0.6rem; font-size: 0.75rem; display: inline-flex; align-items: center; gap: 0.3rem; text-decoration: none;" title="Download file">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            Download
+          </a>
+
+          <button type="button" class="btn" style="padding: 0.3rem 0.6rem; font-size: 0.75rem; color: #f87171; border-color: rgba(239, 68, 68, 0.3); display: inline-flex; align-items: center; gap: 0.3rem;" @click="deleteSingle()" title="Delete file from disk">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M3 6h18"/>
+              <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/>
+              <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>
+            </svg>
+            Delete
+          </button>
+        </div>
+
+        <!-- Inline Rename Input Form -->
+        <form x-show="renaming" @submit.prevent="performRename()" style="display: flex; gap: 0.35rem; width: 100%;">
+          <input type="text" x-model="newName" class="inline-edit-input" style="flex: 1; font-size: 0.8125rem; padding: 0.3rem 0.5rem;" autofocus>
+          <button type="submit" class="btn btn-primary" style="padding: 0.3rem 0.6rem; font-size: 0.75rem;">Save</button>
+          <button type="button" class="btn" style="padding: 0.3rem 0.6rem; font-size: 0.75rem;" @click="renaming = false">Cancel</button>
+        </form>
+      </div>
+
       <!-- Metadata Section -->
-      <div style="font-size: 0.8125rem; color: var(--text-muted); margin-bottom: 1.25rem;">
-        {% if image.is_video %}
-          <div style="margin-bottom: 0.3rem;"><span class="badge" style="background: rgba(99, 102, 241, 0.2); color: #a5b4fc; font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 9999px;">Video File</span></div>
+      <div class="modal-meta-grid" style="font-size: 0.8125rem; color: var(--text-muted); margin-bottom: 1.25rem; background: rgba(15, 23, 42, 0.5); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 0.75rem;">
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.4rem;">
+          <span style="color: var(--text-dim);">Type:</span>
+          <span style="color: var(--text-main); font-weight: 500;">
+            {% if image.is_video %}
+              <span class="badge" style="background: rgba(99, 102, 241, 0.2); color: #a5b4fc; font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 9999px;">{{ image.file_format or 'Video' }}</span>
+            {% else %}
+              <span class="badge" style="background: rgba(16, 185, 129, 0.15); color: #6ee7b7; font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 9999px;">{{ image.file_format or 'Image' }}</span>
+            {% endif %}
+          </span>
+        </div>
+
+        {% if image.file_size and image.file_size > 0 %}
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.4rem;">
+            <span style="color: var(--text-dim);">File Size:</span>
+            <span style="color: var(--text-main); font-weight: 600;" title="{{ image.file_size }} bytes">{{ image.formatted_size }}</span>
+          </div>
         {% endif %}
+
+        {% if image.is_video and image.duration and image.duration > 0 %}
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.4rem;">
+            <span style="color: var(--text-dim);">Length:</span>
+            <span style="color: #a5b4fc; font-weight: 600;">{{ image.formatted_duration }} <span style="font-size: 0.75rem; color: var(--text-dim); font-weight: 400;">({{ '%.1f'|format(image.duration) }}s)</span></span>
+          </div>
+        {% endif %}
+
         {% if image.width and image.height %}
-          <div style="margin-bottom: 0.3rem;"><strong>Dimensions:</strong> {{ image.width }} × {{ image.height }} px</div>
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.4rem;">
+            <span style="color: var(--text-dim);">Dimensions:</span>
+            <span style="color: var(--text-main);">{{ image.width }} × {{ image.height }} px</span>
+          </div>
         {% endif %}
-        <div style="margin-bottom: 0.3rem; word-break: break-all;"><strong>File Path:</strong> {{ image.file_path }}</div>
-        <div><strong>Scanned:</strong> {{ image.scanned_at }}</div>
+
+        <div style="margin-top: 0.4rem; padding-top: 0.4rem; border-top: 1px solid rgba(255, 255, 255, 0.06); word-break: break-all;">
+          <div style="color: var(--text-dim); margin-bottom: 0.2rem;">File Path:</div>
+          <a href="/folders?path={{ image.parent_folder }}" class="modal-folder-link" title="Open containing folder: {{ image.parent_folder }}">
+            {{ image.file_path }}
+          </a>
+        </div>
+
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 0.4rem;">
+          <span style="color: var(--text-dim);">Scanned:</span>
+          <span style="color: var(--text-muted); font-size: 0.75rem;">{{ image.scanned_at }}</span>
+        </div>
       </div>
 
       <!-- Recognized Faces Section (Named faces prioritized on top) -->
@@ -217,14 +358,14 @@
                 {% endif %}
                 
                 <div style="flex: 1; min-width: 0;" x-data="{ editing: false }">
-                  <div x-show="!editing" style="display: flex; align-items: center; justify-content: space-between; gap: 0.4rem;">
-                    <div>
+                  <div x-show="!editing" style="display: flex; align-items: center; justify-content: space-between; gap: 0.4rem; flex-wrap: wrap;">
+                    <div style="min-width: 0; flex: 1 1 auto;">
                       {% if face_url %}
-                        <a href="{{ face_url }}" style="color: #a5b4fc; font-weight: 600; text-decoration: none; font-size: 0.875rem;" title="View all photos & videos with {{ face.person_name }}">
+                        <a href="{{ face_url }}" style="color: #a5b4fc; font-weight: 600; text-decoration: none; font-size: 0.875rem; word-break: break-word;" title="View all photos & videos with {{ face.person_name }}">
                           {{ face.person_name }}
                         </a>
                       {% else %}
-                        <span style="color: var(--text-muted); font-size: 0.875rem;">{{ face.person_name }}</span>
+                        <span style="color: var(--text-muted); font-size: 0.875rem; word-break: break-word;">{{ face.person_name }}</span>
                       {% endif %}
                       <div style="font-size: 0.7rem; color: var(--text-dim);">
                         Conf: {{ '%.0f' | format(face.confidence * 100) }}%
@@ -234,35 +375,44 @@
                       </div>
                     </div>
                     
-                    <div style="display: flex; align-items: center; gap: 0.3rem;">
-                      <button @click="editing = true" class="btn" style="padding: 0.2rem 0.4rem; font-size: 0.725rem;" title="Rename or assign name">
+                    <div style="display: flex; align-items: center; gap: 0.35rem; flex-shrink: 0;">
+                      <button 
+                        type="button"
+                        @click="editing = true" 
+                        class="btn" 
+                        style="padding: 0.25rem 0.45rem; font-size: 0.75rem;" 
+                        title="Rename or assign name"
+                      >
                         Name
                       </button>
                       <button 
                         type="button"
                         class="btn btn-primary" 
-                        style="padding: 0.2rem 0.45rem; font-size: 0.725rem;" 
+                        style="padding: 0.25rem 0.5rem; font-size: 0.75rem;" 
                         title="Move to another person or cluster"
-                        @click="openPicker('move_face', {{ face.face_id }}, {{ image.id }}, '{{ face.person_name }}')"
+                        @click="openPicker('move_face', {{ face.face_id }}, {{ image.id }}, {{ face.person_name|tojson|forceescape }})"
                       >
                         Move
                       </button>
-                      <button 
-                        type="button"
-                        class="btn" 
-                        style="padding: 0.2rem 0.35rem; font-size: 0.725rem; color: #f87171;" 
-                        title="Unlink / remove face from this person or cluster"
-                        hx-post="/api/faces/{{ face.face_id }}/unlink"
-                        hx-target="#modal-container"
-                        hx-swap="innerHTML"
-                        hx-vals='{"image_id": {{ image.id }}}'
-                        hx-confirm="Remove this face from this person/cluster?"
-                      >
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                          <path d="M18.36 6.64a9 9 0 1 1-12.73 0"/>
-                          <line x1="12" y1="2" x2="12" y2="12"/>
-                        </svg>
-                      </button>
+                      {% if face.person_id or face.cluster_id >= 0 %}
+                        <button 
+                          type="button"
+                          class="btn" 
+                          style="padding: 0.25rem 0.45rem; font-size: 0.75rem; color: #f87171;" 
+                          title="Unlink face (remove from person or cluster)"
+                          hx-post="/api/faces/{{ face.face_id }}/unlink"
+                          hx-target="#modal-container"
+                          hx-swap="innerHTML"
+                          hx-vals='{"image_id": {{ image.id }}}'
+                          hx-confirm="Remove this face from this person/cluster?"
+                        >
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: -1px; margin-right: 2px;">
+                            <path d="M18.36 6.64a9 9 0 1 1-12.73 0"/>
+                            <line x1="12" y1="2" x2="12" y2="12"/>
+                          </svg>
+                          Unlink
+                        </button>
+                      {% endif %}
                     </div>
                   </div>
 
@@ -276,7 +426,7 @@
                     @submit="editing = false"
                   >
                     <input type="hidden" name="image_id" value="{{ image.id }}">
-                    <input type="text" name="name" placeholder="Enter person name..." class="inline-edit-input" autofocus style="margin-bottom: 0.3rem;">
+                    <input type="text" name="name" placeholder="Enter person name..." class="inline-edit-input" autofocus style="margin-bottom: 0.3rem; width: 100%;">
                     <div style="display: flex; gap: 0.3rem;">
                       <button type="submit" class="btn btn-primary" style="padding: 0.2rem 0.5rem; font-size: 0.75rem;">Save</button>
                       <button type="button" @click="editing = false" class="btn" style="padding: 0.2rem 0.5rem; font-size: 0.75rem;">Cancel</button>

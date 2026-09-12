@@ -7,13 +7,16 @@ from __future__ import annotations
 
 import mimetypes
 import os
+import re
+import shutil
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-from fastapi import FastAPI, Form, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse, HTMLResponse
+from typing import Any, Dict, List, Optional, Union
+from fastapi import Body, FastAPI, Form, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 
 from app.cache import ThumbnailCache
 from app.db import Database
@@ -44,11 +47,11 @@ class ScanManager:
     def start_scan(
         self,
         input_dir: str,
-        conf_threshold: float = 0.5,
-        eps: float = 0.65,
+        conf_threshold: float = 0.60,
+        eps: float = 0.43,
         min_samples: int = 1,
-        algorithm: str = "dbscan",
-        min_interval_sec: float = 30.0,
+        algorithm: str = "agglomerative",
+        min_interval_sec: float = 60.0,
         match_threshold: Optional[float] = None,
     ) -> bool:
         with self._lock:
@@ -124,6 +127,73 @@ class ScanManager:
                 self.error = str(e)
                 self.progress_message = f"Scan error: {e}"
                 self.logs.append(f"Failed with exception: {e}")
+
+
+class DeleteFilesRequest(BaseModel):
+    image_ids: List[int]
+
+
+class RenameFileRequest(BaseModel):
+    image_id: int
+    new_name: str
+
+
+class BatchRenameRequest(BaseModel):
+    image_ids: List[int]
+    mode: str = "prefix"  # prefix, suffix, replace, pattern
+    prefix: Optional[str] = ""
+    suffix: Optional[str] = ""
+    find_text: Optional[str] = ""
+    replace_text: Optional[str] = ""
+    pattern: Optional[str] = ""
+    start_index: int = 1
+
+
+class MoveFilesRequest(BaseModel):
+    image_ids: List[int]
+    destination_folder: str
+
+
+class CopyFilesRequest(BaseModel):
+    image_ids: List[int]
+    destination_folder: Optional[str] = None
+
+
+class BatchFavoriteRequest(BaseModel):
+    image_ids: List[int]
+    is_favorite: bool = True
+
+
+def _parse_image_ids(raw_ids: Any) -> List[int]:
+    """Extract list of integer image IDs from list, string, or int input."""
+    if isinstance(raw_ids, list):
+        out = []
+        for x in raw_ids:
+            if isinstance(x, int):
+                out.append(x)
+            elif str(x).isdigit():
+                out.append(int(x))
+        return out
+    if isinstance(raw_ids, str):
+        return [int(x.strip()) for x in raw_ids.split(",") if x.strip().isdigit()]
+    if isinstance(raw_ids, int):
+        return [raw_ids]
+    return []
+
+
+def _get_unique_destination_path(target_dir: Path, filename: str) -> Path:
+    """Ensure unique destination path by appending _1, _2, etc. if candidate exists."""
+    dest = target_dir / filename
+    if not dest.exists():
+        return dest
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix
+    counter = 1
+    while True:
+        candidate = target_dir / f"{stem}_{counter}{suffix}"
+        if not candidate.exists():
+            return candidate
+        counter += 1
 
 
 def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = None) -> FastAPI:
@@ -368,12 +438,12 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
     async def save_settings_endpoint(
         request: Request,
         input_dir: str = Form(...),
-        conf_threshold: float = Form(0.5),
-        eps: float = Form(0.38),
+        conf_threshold: float = Form(0.60),
+        eps: float = Form(0.43),
         min_samples: int = Form(1),
         algorithm: str = Form("agglomerative"),
-        min_interval_sec: float = Form(30.0),
-        recognition_match_threshold: float = Form(0.38),
+        min_interval_sec: float = Form(60.0),
+        recognition_match_threshold: float = Form(0.42),
     ):
         db.set_settings({
             "input_dir": input_dir,
@@ -416,12 +486,12 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
     async def trigger_scan(
         request: Request,
         input_dir: str = Form(...),
-        conf_threshold: float = Form(0.5),
-        eps: float = Form(0.38),
+        conf_threshold: float = Form(0.60),
+        eps: float = Form(0.43),
         min_samples: int = Form(1),
         algorithm: str = Form("agglomerative"),
-        min_interval_sec: float = Form(30.0),
-        recognition_match_threshold: float = Form(0.38),
+        min_interval_sec: float = Form(60.0),
+        recognition_match_threshold: float = Form(0.42),
     ):
         if not Path(input_dir).exists():
             return HTMLResponse(
@@ -529,27 +599,27 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             }
         )
 
-    @app.get("/api/photos/{image_id}/modal", response_class=HTMLResponse)
-    async def get_photo_modal(
+    def _render_photo_modal_response(
         request: Request,
         image_id: int,
-        filter: str = Query("all", alias="filter"),
-        search: Optional[str] = Query(None),
-        person_id: Optional[int] = Query(None),
-        cluster_id: Optional[int] = Query(None),
-        folder_path: Optional[str] = Query(None),
-        sort_by: str = Query("date", alias="sort"),
-        sort_order: str = Query("desc", alias="order"),
-    ):
+        filter_type: str = "all",
+        search: Optional[str] = None,
+        person_id: Optional[int] = None,
+        cluster_id: Optional[int] = None,
+        folder_path: Optional[str] = None,
+        sort_by: str = "date",
+        sort_order: str = "desc",
+    ) -> HTMLResponse:
         img_meta = db.get_image(image_id)
         if not img_meta:
             raise HTTPException(status_code=404, detail="Image not found")
-        img_meta["filename"] = Path(img_meta["file_path"]).name
+        img_p = Path(img_meta["file_path"])
+        img_meta["filename"] = img_p.name
+        img_meta["parent_folder"] = str(img_p.parent)
 
-        # Calculate adjacent IDs for modal arrow/swipe navigation
         adj = db.get_adjacent_image_ids(
             image_id=image_id,
-            filter_type=filter,
+            filter_type=filter_type,
             person_id=person_id,
             cluster_id=cluster_id,
             folder_path=folder_path,
@@ -567,7 +637,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
                 "next_id": adj["next_id"],
                 "current_index": adj["current_index"],
                 "total_count": adj["total_count"],
-                "filter_type": filter,
+                "filter_type": filter_type,
                 "search": search,
                 "person_id": person_id,
                 "cluster_id": cluster_id,
@@ -575,6 +645,32 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
                 "sort_by": sort_by,
                 "sort_order": sort_order,
             },
+        )
+
+    @app.get("/api/photos/{image_id}/modal", response_class=HTMLResponse)
+    async def get_photo_modal(
+        request: Request,
+        image_id: int,
+        filter: str = Query("all", alias="filter"),
+        search: Optional[str] = Query(None),
+        person_id: Optional[int] = Query(None),
+        cluster_id: Optional[int] = Query(None),
+        folder_path: Optional[str] = Query(None),
+        path: Optional[str] = Query(None),
+        sort_by: str = Query("date", alias="sort"),
+        sort_order: str = Query("desc", alias="order"),
+    ):
+        effective_folder = folder_path or path
+        return _render_photo_modal_response(
+            request=request,
+            image_id=image_id,
+            filter_type=filter,
+            search=search,
+            person_id=person_id,
+            cluster_id=cluster_id,
+            folder_path=effective_folder,
+            sort_by=sort_by,
+            sort_order=sort_order,
         )
 
     @app.post("/api/photos/{image_id}/favorite", response_class=HTMLResponse)
@@ -640,15 +736,9 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
 
         db.name_person(name=name, cluster_id=face["cluster_id"], face_id=face_id)
 
-        # Return updated modal
-        img_meta = db.get_image(image_id)
-        if not img_meta:
-            raise HTTPException(status_code=404, detail="Image not found")
-        img_meta["filename"] = Path(img_meta["file_path"]).name
-        return templates.TemplateResponse(
+        return _render_photo_modal_response(
             request=request,
-            name="partials/photo_modal.html",
-            context={"image": img_meta},
+            image_id=image_id,
         )
 
     @app.post("/api/clusters/{cluster_id}/name", response_class=HTMLResponse)
@@ -752,14 +842,9 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         elif target_type == "unlink":
             db.move_face(face_id, unlink=True)
 
-        img_meta = db.get_image(image_id)
-        if not img_meta:
-            raise HTTPException(status_code=404, detail="Image not found")
-        img_meta["filename"] = Path(img_meta["file_path"]).name
-        return templates.TemplateResponse(
+        return _render_photo_modal_response(
             request=request,
-            name="partials/photo_modal.html",
-            context={"image": img_meta},
+            image_id=image_id,
         )
 
     @app.post("/api/faces/{face_id}/unlink", response_class=HTMLResponse)
@@ -769,14 +854,9 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         image_id: int = Form(...),
     ):
         db.move_face(face_id, unlink=True)
-        img_meta = db.get_image(image_id)
-        if not img_meta:
-            raise HTTPException(status_code=404, detail="Image not found")
-        img_meta["filename"] = Path(img_meta["file_path"]).name
-        return templates.TemplateResponse(
+        return _render_photo_modal_response(
             request=request,
-            name="partials/photo_modal.html",
-            context={"image": img_meta},
+            image_id=image_id,
         )
 
     @app.post("/api/people/{person_id}/merge")
@@ -831,7 +911,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
                 </div>
             """)
 
-        threshold = float(db.get_setting("recognition_match_threshold", 0.38))
+        threshold = float(db.get_setting("recognition_match_threshold", 0.42))
         exclusions = db.get_person_exclusions()
         matcher = MultiExemplarMatcher({person_id: exemplars})
         matched_results = matcher.match_faces_batch(unassigned_faces, exclusions=exclusions, threshold=threshold)
@@ -846,6 +926,158 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
                 Scanned {len(unassigned_faces)} unassigned faces: 0 matched {p['name']} (threshold: {threshold:.2f}).
             </div>
         """)
+
+    @app.get("/api/people/all/candidates")
+    async def get_all_people_candidates_endpoint(
+        limit: int = Query(10, ge=1, le=50),
+        min_dist: Optional[float] = Query(None),
+        max_dist: Optional[float] = Query(None),
+    ):
+        all_exemplars = db.get_all_person_exemplars(max_exemplars=5)
+        unassigned_faces = db.get_unassigned_faces()
+        total_unassigned = len(unassigned_faces)
+
+        if not all_exemplars:
+            return JSONResponse({
+                "candidates": [],
+                "total_unassigned": total_unassigned,
+                "message": "No named people found in library. Name at least one person first.",
+            })
+
+        if not unassigned_faces:
+            return JSONResponse({
+                "candidates": [],
+                "total_unassigned": 0,
+                "message": "All faces in library are already assigned to people.",
+            })
+
+        rec_thresh = float(db.get_setting("recognition_match_threshold", 0.42))
+        _min_dist = min_dist if min_dist is not None else max(0.20, rec_thresh - 0.05)
+        _max_dist = max_dist if max_dist is not None else 0.60
+
+        exclusions = db.get_person_exclusions()
+        matcher = MultiExemplarMatcher(all_exemplars)
+        cands = matcher.find_uncertain_candidates_all(
+            faces=unassigned_faces,
+            exclusions=exclusions,
+            min_dist=_min_dist,
+            max_dist=_max_dist,
+            limit=limit,
+        )
+
+        all_people = {p["id"]: p for p in db.get_people()}
+
+        formatted_cands = []
+        for c in cands:
+            p_id = c["target_person_id"]
+            p_info = all_people.get(p_id, {})
+            formatted_cands.append({
+                "face_id": c["id"],
+                "image_id": c["image_id"],
+                "person_id": p_id,
+                "person_name": p_info.get("name", f"Person #{p_id}"),
+                "person_cover_face_id": p_info.get("cover_face_id"),
+                "distance": c["distance"],
+                "similarity_pct": c["similarity_pct"],
+                "file_path": c["file_path"],
+                "filename": Path(c["file_path"]).name if c.get("file_path") else "",
+                "bbox": c["bbox"],
+            })
+
+        return JSONResponse({
+            "candidates": formatted_cands,
+            "total_unassigned": total_unassigned,
+            "message": "No uncertain matches found in library." if not formatted_cands else "",
+        })
+
+    @app.get("/api/people/{person_id}/candidates")
+    async def get_person_candidates_endpoint(
+        person_id: int,
+        limit: int = Query(10, ge=1, le=50),
+        min_dist: Optional[float] = Query(None),
+        max_dist: Optional[float] = Query(None),
+    ):
+        p = db.get_person(person_id)
+        if not p:
+            raise HTTPException(status_code=404, detail="Person not found")
+
+        exemplars = db.get_person_exemplars(person_id, max_exemplars=5)
+        if not exemplars:
+            return JSONResponse({
+                "person": {"id": p["id"], "name": p["name"], "cover_face_id": p.get("cover_face_id")},
+                "candidates": [],
+                "message": f"No reference face embeddings found for {p['name']}. Assign at least one face first.",
+            })
+
+        unassigned_faces = db.get_unassigned_faces()
+        if not unassigned_faces:
+            return JSONResponse({
+                "person": {"id": p["id"], "name": p["name"], "cover_face_id": p.get("cover_face_id")},
+                "candidates": [],
+                "message": "No unassigned faces left in library.",
+            })
+
+        rec_thresh = float(db.get_setting("recognition_match_threshold", 0.42))
+        _min_dist = min_dist if min_dist is not None else max(0.20, rec_thresh - 0.05)
+        _max_dist = max_dist if max_dist is not None else 0.60
+
+        exclusions = db.get_person_exclusions()
+        matcher = MultiExemplarMatcher({person_id: exemplars})
+        cands = matcher.find_uncertain_candidates(
+            person_id=person_id,
+            faces=unassigned_faces,
+            exclusions=exclusions,
+            min_dist=_min_dist,
+            max_dist=_max_dist,
+            limit=limit,
+        )
+
+        formatted_cands = []
+        for c in cands:
+            formatted_cands.append({
+                "face_id": c["id"],
+                "image_id": c["image_id"],
+                "distance": c["distance"],
+                "similarity_pct": c["similarity_pct"],
+                "file_path": c["file_path"],
+                "filename": Path(c["file_path"]).name if c.get("file_path") else "",
+                "bbox": c["bbox"],
+            })
+
+        return JSONResponse({
+            "person": {
+                "id": p["id"],
+                "name": p["name"],
+                "cover_face_id": p.get("cover_face_id"),
+            },
+            "candidates": formatted_cands,
+            "total_unassigned": len(unassigned_faces),
+        })
+
+    @app.post("/api/people/{person_id}/confirm-match")
+    async def confirm_person_match_endpoint(
+        person_id: int,
+        request: Request,
+    ):
+        p = db.get_person(person_id)
+        if not p:
+            raise HTTPException(status_code=404, detail="Person not found")
+
+        body = await request.json()
+        face_id = body.get("face_id")
+        matched = body.get("matched", False)
+
+        if not face_id:
+            raise HTTPException(status_code=400, detail="face_id is required")
+
+        if matched:
+            db.assign_faces_to_person([int(face_id)], person_id)
+            action = "assigned"
+        else:
+            db.add_person_exclusion(int(face_id), person_id)
+            action = "excluded"
+
+        return JSONResponse({"status": "ok", "action": action, "face_id": face_id, "person_id": person_id})
 
     @app.post("/api/people/autotag-all", response_class=HTMLResponse)
     async def autotag_all_people_endpoint():
@@ -865,7 +1097,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
                 </div>
             """)
 
-        threshold = float(db.get_setting("recognition_match_threshold", 0.38))
+        threshold = float(db.get_setting("recognition_match_threshold", 0.42))
         exclusions = db.get_person_exclusions()
         matcher = MultiExemplarMatcher(all_exemplars)
         matched_results = matcher.match_faces_batch(unassigned_faces, exclusions=exclusions, threshold=threshold)
@@ -898,6 +1130,301 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
     async def merge_people(source_id: int = Form(...), target_id: int = Form(...)):
         db.merge_people(source_person_id=source_id, target_person_id=target_id)
         return {"status": "success", "merged_into": target_id}
+
+    # ==================== FILE MANAGEMENT ENDPOINTS ====================
+
+    async def _extract_request_payload(req: Request) -> Dict[str, Any]:
+        """Extract parameters from either application/json or multipart/form-data / x-www-form-urlencoded."""
+        c_type = req.headers.get("content-type", "")
+        if "application/json" in c_type:
+            try:
+                return await req.json()
+            except Exception:
+                return {}
+        try:
+            form = await req.form()
+            return dict(form)
+        except Exception:
+            return {}
+
+    @app.post("/api/files/delete")
+    async def delete_files_endpoint(request: Request):
+        payload = await _extract_request_payload(request)
+        raw_ids = _parse_image_ids(payload.get("image_ids") or payload.get("image_id"))
+
+        if not raw_ids:
+            raise HTTPException(status_code=400, detail="No image IDs provided")
+
+        deleted_count = 0
+        for img_id in raw_ids:
+            img = db.get_image(img_id)
+            if img and img.get("file_path"):
+                fpath = Path(img["file_path"])
+                if fpath.exists() and fpath.is_file():
+                    try:
+                        fpath.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                cache.invalidate_media_cache(img["file_path"])
+                deleted_count += 1
+
+        db.delete_image_records(raw_ids)
+        return JSONResponse({"status": "success", "deleted_count": deleted_count, "deleted_ids": raw_ids})
+
+    @app.post("/api/files/rename")
+    async def rename_file_endpoint(request: Request):
+        payload = await _extract_request_payload(request)
+        img_id = payload.get("image_id")
+        new_name = payload.get("new_name")
+
+        if img_id is None or not new_name:
+            raise HTTPException(status_code=400, detail="image_id and new_name are required")
+
+        try:
+            img_id = int(img_id)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="Invalid image_id")
+
+        new_name = str(new_name).strip()
+        if not new_name or "/" in new_name or "\\" in new_name or ".." in new_name:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+
+        img = db.get_image(img_id)
+        if not img or not img.get("file_path"):
+            raise HTTPException(status_code=404, detail="Image not found")
+
+        old_path = Path(img["file_path"])
+        if not old_path.exists():
+            raise HTTPException(status_code=404, detail="File does not exist on disk")
+
+        # If user didn't specify extension, keep existing extension
+        if not Path(new_name).suffix and old_path.suffix:
+            new_name = f"{new_name}{old_path.suffix}"
+
+        dest_path = old_path.parent / new_name
+        if dest_path.resolve() == old_path.resolve():
+            return JSONResponse({"status": "success", "image_id": img_id, "new_name": new_name, "new_path": str(dest_path)})
+
+        if dest_path.exists():
+            raise HTTPException(status_code=400, detail=f"A file named '{new_name}' already exists in this folder")
+
+        try:
+            old_path.rename(dest_path)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to rename file: {e}")
+
+        cache.invalidate_media_cache(old_path)
+        db.update_image_path(img_id, str(dest_path))
+
+        return JSONResponse({
+            "status": "success",
+            "image_id": img_id,
+            "new_name": new_name,
+            "new_path": str(dest_path)
+        })
+
+    @app.post("/api/files/batch-rename")
+    async def batch_rename_endpoint(request: Request):
+        payload = await _extract_request_payload(request)
+        raw_ids = _parse_image_ids(payload.get("image_ids"))
+        mode = str(payload.get("mode", "prefix"))
+        prefix = str(payload.get("prefix", ""))
+        suffix = str(payload.get("suffix", ""))
+        find_text = str(payload.get("find_text", ""))
+        replace_text = str(payload.get("replace_text", ""))
+        pattern = str(payload.get("pattern", ""))
+        try:
+            start_index = int(payload.get("start_index", 1))
+        except (ValueError, TypeError):
+            start_index = 1
+
+        if not raw_ids:
+            raise HTTPException(status_code=400, detail="No image IDs provided")
+
+        renamed_count = 0
+        for idx, img_id in enumerate(raw_ids):
+            img = db.get_image(img_id)
+            if not img or not img.get("file_path"):
+                continue
+            old_path = Path(img["file_path"])
+            if not old_path.exists():
+                continue
+
+            stem = old_path.stem
+            ext = old_path.suffix
+
+            if mode == "prefix":
+                new_filename = f"{prefix}{stem}{ext}"
+            elif mode == "suffix":
+                new_filename = f"{stem}{suffix}{ext}"
+            elif mode == "replace":
+                if find_text:
+                    new_filename = f"{stem.replace(find_text, replace_text)}{ext}"
+                else:
+                    new_filename = old_path.name
+            elif mode == "pattern":
+                seq_num = start_index + idx
+                if "{n}" in pattern:
+                    p_name = pattern.replace("{n}", f"{seq_num:02d}")
+                elif "{n:03d}" in pattern:
+                    p_name = pattern.replace("{n:03d}", f"{seq_num:03d}")
+                elif "{n:04d}" in pattern:
+                    p_name = pattern.replace("{n:04d}", f"{seq_num:04d}")
+                elif "{name}" in pattern:
+                    p_name = pattern.replace("{name}", stem)
+                else:
+                    p_name = f"{pattern}_{seq_num}" if pattern else f"{stem}_{seq_num}"
+                new_filename = f"{p_name}{ext}" if not Path(p_name).suffix else p_name
+            else:
+                new_filename = old_path.name
+
+            new_filename = new_filename.strip()
+            if not new_filename or "/" in new_filename or "\\" in new_filename or ".." in new_filename:
+                continue
+
+            dest_path = _get_unique_destination_path(old_path.parent, new_filename)
+            if dest_path.resolve() == old_path.resolve():
+                continue
+
+            try:
+                old_path.rename(dest_path)
+                cache.invalidate_media_cache(old_path)
+                db.update_image_path(img_id, str(dest_path))
+                renamed_count += 1
+            except Exception:
+                pass
+
+        return JSONResponse({"status": "success", "renamed_count": renamed_count})
+
+    @app.post("/api/files/move")
+    async def move_files_endpoint(request: Request):
+        payload = await _extract_request_payload(request)
+        raw_ids = _parse_image_ids(payload.get("image_ids"))
+        destination_folder = str(payload.get("destination_folder", "")).strip()
+
+        if not raw_ids:
+            raise HTTPException(status_code=400, detail="No image IDs provided")
+        if not destination_folder:
+            raise HTTPException(status_code=400, detail="destination_folder is required")
+
+        dest_dir = Path(destination_folder).resolve()
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        moved_count = 0
+        for img_id in raw_ids:
+            img = db.get_image(img_id)
+            if not img or not img.get("file_path"):
+                continue
+            old_path = Path(img["file_path"])
+            if not old_path.exists():
+                continue
+
+            target_path = _get_unique_destination_path(dest_dir, old_path.name)
+            if target_path.resolve() == old_path.resolve():
+                continue
+
+            try:
+                shutil.move(str(old_path), str(target_path))
+                cache.invalidate_media_cache(old_path)
+                db.update_image_path(img_id, str(target_path))
+                moved_count += 1
+            except Exception:
+                pass
+
+        return JSONResponse({
+            "status": "success",
+            "moved_count": moved_count,
+            "destination": str(dest_dir)
+        })
+
+    @app.post("/api/files/copy")
+    async def copy_files_endpoint(request: Request):
+        payload = await _extract_request_payload(request)
+        raw_ids = _parse_image_ids(payload.get("image_ids"))
+        destination_folder = payload.get("destination_folder")
+        if destination_folder:
+            destination_folder = str(destination_folder).strip()
+
+        if not raw_ids:
+            raise HTTPException(status_code=400, detail="No image IDs provided")
+
+        copied_count = 0
+        for img_id in raw_ids:
+            img = db.get_image(img_id)
+            if not img or not img.get("file_path"):
+                continue
+            src_path = Path(img["file_path"])
+            if not src_path.exists():
+                continue
+
+            if destination_folder:
+                dest_dir = Path(destination_folder).resolve()
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                candidate_name = src_path.name
+            else:
+                dest_dir = src_path.parent
+                candidate_name = f"{src_path.stem}_copy{src_path.suffix}"
+
+            target_path = _get_unique_destination_path(dest_dir, candidate_name)
+            try:
+                shutil.copy2(str(src_path), str(target_path))
+                db.clone_image_record(img_id, str(target_path))
+                copied_count += 1
+            except Exception:
+                pass
+
+        return JSONResponse({"status": "success", "copied_count": copied_count})
+
+    @app.post("/api/files/batch-favorite")
+    async def batch_favorite_endpoint(request: Request):
+        payload = await _extract_request_payload(request)
+        raw_ids = _parse_image_ids(payload.get("image_ids"))
+        raw_fav = payload.get("is_favorite", True)
+        if isinstance(raw_fav, str):
+            is_favorite = raw_fav.lower() in ("true", "1", "yes")
+        else:
+            is_favorite = bool(raw_fav)
+
+        if not raw_ids:
+            raise HTTPException(status_code=400, detail="No image IDs provided")
+
+        count = db.batch_toggle_favorites(raw_ids, is_favorite)
+        return JSONResponse({"status": "success", "count": count, "is_favorite": is_favorite})
+
+    @app.get("/api/folders/list")
+    async def get_folders_list():
+        folders = db.get_all_folder_paths()
+        return JSONResponse({"folders": folders})
+
+    @app.get("/api/folders/picker-modal", response_class=HTMLResponse)
+    async def get_folder_picker_modal(
+        request: Request,
+        action: str = Query("move"),
+        image_ids: str = Query(""),
+        current_folder: Optional[str] = Query(None),
+    ):
+        folders = db.get_all_folder_paths()
+        return templates.TemplateResponse(
+            request=request,
+            name="partials/folder_picker_modal.html",
+            context={
+                "action": action,
+                "image_ids": image_ids,
+                "folders": folders,
+                "current_folder": current_folder,
+            },
+        )
+
+    @app.get("/api/files/batch-rename-modal", response_class=HTMLResponse)
+    async def get_batch_rename_modal(
+        request: Request,
+        image_ids: str = Query(""),
+    ):
+        return templates.TemplateResponse(
+            request=request,
+            name="partials/batch_rename_modal.html",
+            context={"image_ids": image_ids},
+        )
 
     return app
 

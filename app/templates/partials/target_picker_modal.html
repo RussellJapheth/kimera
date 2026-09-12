@@ -32,7 +32,7 @@
         hx-post="/api/faces/{{ source_id }}/move" 
         hx-target="#modal-container" 
         hx-swap="innerHTML"
-        hx-on::after-request="closePicker()"
+        hx-on::after-request="if (window.closePicker) window.closePicker()"
         style="display: flex; gap: 0.5rem; align-items: center;"
       >
         <input type="hidden" name="image_id" value="{{ image_id }}">
@@ -54,7 +54,7 @@
         hx-post="/api/clusters/{{ source_id }}/name" 
         hx-target="#cluster-name-section" 
         hx-swap="outerHTML"
-        hx-on::after-request="closePicker()"
+        hx-on::after-request="if (window.closePicker) window.closePicker()"
         style="display: flex; gap: 0.5rem; align-items: center;"
       >
         <input 

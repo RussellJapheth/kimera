@@ -275,7 +275,7 @@ class FaceDetector:
     def __init__(
         self,
         model_path: Optional[Path | str] = None,
-        conf_threshold: float = 0.5,
+        conf_threshold: float = 0.60,
         nms_threshold: float = 0.3,
         engine: str = "auto",  # 'auto', 'insightface', 'yunet'
         model_pack: str = "buffalo_l",

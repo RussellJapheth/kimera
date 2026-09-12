@@ -13,6 +13,38 @@ import numpy as np
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".m4v"}
 
 
+def format_file_size(size_bytes: int | float | None) -> str:
+    """Format byte count into human-readable size string (e.g. '12.4 MB')."""
+    if not size_bytes or size_bytes <= 0:
+        return "0 B"
+    size = float(size_bytes)
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if size < 1024.0 or unit == "TB":
+            if unit == "B":
+                return f"{int(size)} B"
+            elif unit == "KB":
+                return f"{size:.1f} KB"
+            elif unit == "MB":
+                return f"{size:.1f} MB"
+            else:
+                return f"{size:.2f} {unit}"
+        size /= 1024.0
+    return f"{int(size_bytes)} B"
+
+
+def format_duration(duration_sec: float | int | None) -> str:
+    """Format seconds into HH:MM:SS or MM:SS."""
+    if not duration_sec or duration_sec <= 0:
+        return ""
+    total_sec = int(round(float(duration_sec)))
+    hours = total_sec // 3600
+    mins = (total_sec % 3600) // 60
+    secs = total_sec % 60
+    if hours > 0:
+        return f"{hours}:{mins:02d}:{secs:02d}"
+    return f"{mins}:{secs:02d}"
+
+
 class Database:
     """Manages the SQLite database for photo faces, clustering, favorites, and people."""
 
@@ -37,7 +69,11 @@ class Database:
                     scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     is_favorite INTEGER DEFAULT 0,
                     width INTEGER DEFAULT 0,
-                    height INTEGER DEFAULT 0
+                    height INTEGER DEFAULT 0,
+                    file_size INTEGER DEFAULT 0,
+                    mtime REAL DEFAULT 0.0,
+                    content_hash TEXT DEFAULT '',
+                    duration REAL DEFAULT 0.0
                 );
 
                 CREATE TABLE IF NOT EXISTS people (
@@ -93,6 +129,8 @@ class Database:
                 cursor.execute("ALTER TABLE images ADD COLUMN mtime REAL DEFAULT 0.0")
             if "content_hash" not in image_cols:
                 cursor.execute("ALTER TABLE images ADD COLUMN content_hash TEXT DEFAULT ''")
+            if "duration" not in image_cols:
+                cursor.execute("ALTER TABLE images ADD COLUMN duration REAL DEFAULT 0.0")
 
             cursor.execute("PRAGMA table_info(faces)")
             face_cols = {col["name"] for col in cursor.fetchall()}
@@ -103,6 +141,7 @@ class Database:
             conn.executescript("""
                 CREATE INDEX IF NOT EXISTS idx_images_favorite ON images(is_favorite);
                 CREATE INDEX IF NOT EXISTS idx_images_file_path ON images(file_path);
+                CREATE INDEX IF NOT EXISTS idx_images_file_size ON images(file_size);
                 CREATE INDEX IF NOT EXISTS idx_faces_image_id ON faces(image_id);
                 CREATE INDEX IF NOT EXISTS idx_faces_cluster_id ON faces(cluster_id);
                 CREATE INDEX IF NOT EXISTS idx_faces_person_id ON faces(person_id);
@@ -151,26 +190,31 @@ class Database:
         file_size: int = 0,
         mtime: float = 0.0,
         content_hash: str = "",
+        duration: float = 0.0,
     ) -> int:
         """Insert or retrieve an image ID given its file path and metadata."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT OR IGNORE INTO images (file_path, width, height, file_size, mtime, content_hash)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT OR IGNORE INTO images (file_path, width, height, file_size, mtime, content_hash, duration)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (file_path, int(width), int(height), int(file_size), float(mtime), content_hash)
+                (file_path, int(width), int(height), int(file_size), float(mtime), content_hash, float(duration))
             )
-            if width > 0 and height > 0:
+            if (width > 0 and height > 0) or file_size > 0 or duration > 0.0:
                 cursor.execute(
                     """
                     UPDATE images 
-                    SET width = ?, height = ?, file_size = COALESCE(NULLIF(?, 0), file_size),
-                        mtime = COALESCE(NULLIF(?, 0.0), mtime), content_hash = COALESCE(NULLIF(?, ''), content_hash)
+                    SET width = COALESCE(NULLIF(?, 0), width),
+                        height = COALESCE(NULLIF(?, 0), height),
+                        file_size = COALESCE(NULLIF(?, 0), file_size),
+                        mtime = COALESCE(NULLIF(?, 0.0), mtime),
+                        content_hash = COALESCE(NULLIF(?, ''), content_hash),
+                        duration = COALESCE(NULLIF(?, 0.0), duration)
                     WHERE file_path = ?
                     """,
-                    (int(width), int(height), int(file_size), float(mtime), content_hash, file_path)
+                    (int(width), int(height), int(file_size), float(mtime), content_hash, float(duration), file_path)
                 )
             cursor.execute(
                 "SELECT id FROM images WHERE file_path = ?",
@@ -184,7 +228,7 @@ class Database:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT id, file_path, file_size, mtime, content_hash, width, height FROM images WHERE file_path = ?",
+                "SELECT id, file_path, file_size, mtime, content_hash, width, height, duration FROM images WHERE file_path = ?",
                 (file_path,)
             )
             row = cursor.fetchone()
@@ -196,7 +240,7 @@ class Database:
         """Retrieve a dictionary mapping file_path -> file_meta for all indexed files."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT id, file_path, file_size, mtime, content_hash, width, height FROM images")
+            cursor.execute("SELECT id, file_path, file_size, mtime, content_hash, width, height, duration FROM images")
             rows = cursor.fetchall()
             return {str(row["file_path"]): dict(row) for row in rows}
 
@@ -209,6 +253,7 @@ class Database:
         content_hash: str,
         width: int = 0,
         height: int = 0,
+        duration: float = 0.0,
     ) -> None:
         """Update file stat and hash metadata for an image record."""
         with self._get_connection() as conn:
@@ -217,19 +262,21 @@ class Database:
                 cursor.execute(
                     """
                     UPDATE images 
-                    SET file_size = ?, mtime = ?, content_hash = ?, width = ?, height = ?
+                    SET file_size = ?, mtime = ?, content_hash = ?, width = ?, height = ?,
+                        duration = COALESCE(NULLIF(?, 0.0), duration)
                     WHERE id = ?
                     """,
-                    (int(file_size), float(mtime), content_hash, int(width), int(height), int(image_id))
+                    (int(file_size), float(mtime), content_hash, int(width), int(height), float(duration), int(image_id))
                 )
             else:
                 cursor.execute(
                     """
                     UPDATE images 
-                    SET file_size = ?, mtime = ?, content_hash = ?
+                    SET file_size = ?, mtime = ?, content_hash = ?,
+                        duration = COALESCE(NULLIF(?, 0.0), duration)
                     WHERE id = ?
                     """,
-                    (int(file_size), float(mtime), content_hash, int(image_id))
+                    (int(file_size), float(mtime), content_hash, float(duration), int(image_id))
                 )
 
     def clear_faces_for_image(self, image_id: int) -> None:
@@ -296,6 +343,48 @@ class Database:
             img = dict(row)
             img["is_favorite"] = bool(img.get("is_favorite", 0))
 
+            file_path_str = img["file_path"]
+            p = Path(file_path_str)
+            img["filename"] = p.name
+            img["is_video"] = p.suffix.lower() in VIDEO_EXTENSIONS
+            img["file_size"] = int(img.get("file_size") or 0)
+            img["duration"] = float(img.get("duration") or 0.0)
+
+            # Lazy backfill file_size or duration if missing
+            updated = False
+            if img["file_size"] <= 0 and p.is_file():
+                try:
+                    img["file_size"] = p.stat().st_size
+                    updated = True
+                except Exception:
+                    pass
+
+            if img["is_video"] and img["duration"] <= 0.0 and p.is_file():
+                try:
+                    import cv2
+                    cap = cv2.VideoCapture(file_path_str)
+                    if cap.isOpened():
+                        fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+                        frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0
+                        cap.release()
+                        if fps > 0 and frames > 0:
+                            img["duration"] = float(frames / fps)
+                            updated = True
+                except Exception:
+                    pass
+
+            if updated:
+                cursor.execute(
+                    "UPDATE images SET file_size = ?, duration = ? WHERE id = ?",
+                    (img["file_size"], img["duration"], image_id)
+                )
+
+            img["formatted_size"] = format_file_size(img["file_size"])
+            img["formatted_duration"] = format_duration(img["duration"])
+            ext = p.suffix.lstrip(".").upper()
+            img["extension"] = ext
+            img["file_format"] = f"{ext} Video" if img["is_video"] else (f"{ext} Image" if ext else "Image")
+
             # Fetch associated faces and deduplicate by person/cluster
             cursor.execute("""
                 SELECT f.id as face_id, f.box_x1, f.box_y1, f.box_x2, f.box_y2,
@@ -334,9 +423,6 @@ class Database:
                 else:
                     seen_people[key]["appearance_count"] += 1
 
-            p = Path(img["file_path"])
-            img["filename"] = p.name
-            img["is_video"] = p.suffix.lower() in VIDEO_EXTENSIONS
             # Priority: Named faces first, then cluster faces, then confidence
             sorted_faces = sorted(
                 seen_people.values(),
@@ -352,7 +438,7 @@ class Database:
         cluster_id: Optional[int] = None,
         folder_path: Optional[str] = None,
         search: Optional[str] = None,
-        sort_by: str = "date",  # 'date', 'name', 'faces'
+        sort_by: str = "date",  # 'date', 'name', 'faces', 'size'
         sort_order: str = "desc",  # 'desc', 'asc'
         page: int = 1,
         limit: int = 60,
@@ -392,6 +478,8 @@ class Database:
             order_sql = f"ORDER BY i.file_path {order_dir}, i.id {order_dir}"
         elif sort_by == "faces":
             order_sql = f"ORDER BY face_count {order_dir}, i.id {order_dir}"
+        elif sort_by == "size":
+            order_sql = f"ORDER BY i.file_size {order_dir}, i.id {order_dir}"
         else:  # default date
             order_sql = f"ORDER BY i.scanned_at {order_dir}, i.id {order_dir}"
 
@@ -402,7 +490,7 @@ class Database:
             total_count = cursor.fetchone()["total"]
 
             query = f"""
-                SELECT i.id, i.file_path, i.scanned_at, i.is_favorite, i.width, i.height,
+                SELECT i.id, i.file_path, i.scanned_at, i.is_favorite, i.width, i.height, i.file_size, i.duration,
                        COUNT(DISTINCT COALESCE(f.person_id, f.cluster_id, f.id)) as face_count
                 FROM images i
                 LEFT JOIN faces f ON i.id = f.image_id
@@ -417,6 +505,8 @@ class Database:
             images = []
             for r in rows:
                 p = Path(r["file_path"])
+                f_size = int(r["file_size"] or 0)
+                dur = float(r["duration"] or 0.0)
                 images.append({
                     "id": r["id"],
                     "file_path": r["file_path"],
@@ -426,6 +516,10 @@ class Database:
                     "is_favorite": bool(r["is_favorite"]),
                     "width": r["width"] or 0,
                     "height": r["height"] or 0,
+                    "file_size": f_size,
+                    "formatted_size": format_file_size(f_size),
+                    "duration": dur,
+                    "formatted_duration": format_duration(dur),
                     "face_count": r["face_count"],
                 })
 
@@ -483,6 +577,8 @@ class Database:
             order_sql = f"ORDER BY i.file_path {order_dir}, i.id {order_dir}"
         elif sort_by == "faces":
             order_sql = f"ORDER BY face_count {order_dir}, i.id {order_dir}"
+        elif sort_by == "size":
+            order_sql = f"ORDER BY i.file_size {order_dir}, i.id {order_dir}"
         else:
             order_sql = f"ORDER BY i.scanned_at {order_dir}, i.id {order_dir}"
 
@@ -1156,5 +1252,111 @@ class Database:
                 f"DELETE FROM person_exclusions WHERE person_id = ? AND face_id IN ({placeholders})",
                 [int(person_id)] + [int(fid) for fid in face_ids]
             )
+    def update_image_path(self, image_id: int, new_path: str) -> None:
+        """Update the file_path of an existing image record on disk move or rename."""
+        resolved = str(Path(new_path).resolve())
+        p = Path(resolved)
+        mtime = p.stat().st_mtime if p.exists() else 0.0
+        file_size = p.stat().st_size if p.exists() else 0
+        with self._get_connection() as conn:
+            conn.execute(
+                "UPDATE images SET file_path = ?, mtime = ?, file_size = ? WHERE id = ?",
+                (resolved, mtime, file_size, int(image_id)),
+            )
 
+    def delete_image_records(self, image_ids: List[int]) -> int:
+        """Delete specific image records by IDs (cascades to faces & exclusions)."""
+        if not image_ids:
+            return 0
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            placeholders = ",".join("?" for _ in image_ids)
+            cursor.execute(f"DELETE FROM images WHERE id IN ({placeholders})", [int(i) for i in image_ids])
+            return cursor.rowcount
 
+    def clone_image_record(self, source_image_id: int, new_path: str) -> Optional[int]:
+        """Clone an image and all its face detections/embeddings for a copied file."""
+        resolved = str(Path(new_path).resolve())
+        p = Path(resolved)
+        mtime = p.stat().st_mtime if p.exists() else 0.0
+        file_size = p.stat().st_size if p.exists() else 0
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            # Fetch source image metadata
+            cursor.execute("SELECT * FROM images WHERE id = ?", (int(source_image_id),))
+            src_img = cursor.fetchone()
+            if not src_img:
+                return None
+
+            cursor.execute(
+                """
+                INSERT INTO images (file_path, is_favorite, width, height, file_size, mtime, content_hash, duration)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    resolved,
+                    src_img["is_favorite"],
+                    src_img["width"],
+                    src_img["height"],
+                    file_size or src_img["file_size"],
+                    mtime or src_img["mtime"],
+                    src_img["content_hash"],
+                    src_img["duration"],
+                ),
+            )
+            new_image_id = cursor.lastrowid
+
+            # Clone all face detections for this image
+            cursor.execute("SELECT * FROM faces WHERE image_id = ?", (int(source_image_id),))
+            src_faces = cursor.fetchall()
+            for sf in src_faces:
+                cursor.execute(
+                    """
+                    INSERT INTO faces (image_id, box_x1, box_y1, box_x2, box_y2, confidence, embedding, cluster_id, person_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        new_image_id,
+                        sf["box_x1"],
+                        sf["box_y1"],
+                        sf["box_x2"],
+                        sf["box_y2"],
+                        sf["confidence"],
+                        sf["embedding"],
+                        sf["cluster_id"],
+                        sf["person_id"],
+                    ),
+                )
+            return new_image_id
+
+    def get_all_folder_paths(self) -> List[str]:
+        """Return a sorted list of all unique folder paths containing indexed images."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT file_path FROM images")
+            rows = cursor.fetchall()
+            folders = set()
+            for r in rows:
+                if r["file_path"]:
+                    folders.add(str(Path(r["file_path"]).parent.resolve()))
+            
+            # Also add root scan dir from settings if configured
+            input_dir = self.get_setting("input_dir")
+            if input_dir and Path(input_dir).exists():
+                folders.add(str(Path(input_dir).resolve()))
+            return sorted(list(folders))
+
+    def batch_toggle_favorites(self, image_ids: List[int], is_favorite: bool) -> int:
+        """Batch set favorite status for multiple images."""
+        if not image_ids:
+            return 0
+        val = 1 if is_favorite else 0
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            placeholders = ",".join("?" for _ in image_ids)
+            cursor.execute(
+                f"UPDATE images SET is_favorite = ? WHERE id IN ({placeholders})",
+                [val] + [int(i) for i in image_ids],
+            )
+            return cursor.rowcount

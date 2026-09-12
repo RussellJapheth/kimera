@@ -361,6 +361,8 @@ def test_move_face_and_unlink(test_env):
     # 1. Unlink face
     unlink_resp = client.post(f"/api/faces/{face_id}/unlink", data={"image_id": id1})
     assert unlink_resp.status_code == 200
+    assert "modal-sidebar" in unlink_resp.text
+    assert "Detected People & Faces" in unlink_resp.text
     face_rec = db.get_face(face_id)
     assert face_rec["person_id"] is None
     assert face_rec["cluster_id"] == -1
@@ -372,6 +374,7 @@ def test_move_face_and_unlink(test_env):
         "new_name": "Bob",
     })
     assert move_new_resp.status_code == 200
+    assert "Bob" in move_new_resp.text
     face_rec = db.get_face(face_id)
     assert face_rec["person_name"] == "Bob"
     bob_person_id = face_rec["person_id"]
@@ -384,6 +387,7 @@ def test_move_face_and_unlink(test_env):
         "target_id": alice_id,
     })
     assert move_existing_resp.status_code == 200
+    assert "Alice" in move_existing_resp.text
     face_rec = db.get_face(face_id)
     assert face_rec["person_id"] == alice_id
 

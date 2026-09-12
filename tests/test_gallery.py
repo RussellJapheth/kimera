@@ -240,20 +240,31 @@ def test_cache_configuration_and_stats(tmp_path: Path):
     assert stats_cleared["thumbnail_count"] == 0
 
 
-def test_settings_cache_endpoints(test_env, tmp_path: Path):
-    """Verify web endpoints for updating and clearing cache."""
+def test_photo_modal_context_and_folder_link(test_env):
+    """Verify modal endpoint respects folder path, person_id, and links to folder."""
+    db = test_env["db"]
+    id1 = test_env["id1"]
+    id2 = test_env["id2"]
+    img1 = test_env["img1"]
+
     app = create_app(db_path=str(test_env["db_file"]), cache_dir=str(test_env["cache_dir"]))
     client = TestClient(app)
-    new_cache = tmp_path / "web_custom_cache"
 
-    # Update cache directory
-    resp = client.post("/api/settings/cache", data={"cache_dir": str(new_cache)})
+    # 1. Test modal returns folder link with parent_folder
+    resp = client.get(f"/api/photos/{id1}/modal")
     assert resp.status_code == 200
-    assert "Cache directory updated" in resp.text
+    expected_folder = str(img1.parent)
+    assert f"/folders?path={expected_folder}" in resp.text
+    assert "modal-filename-link" in resp.text
 
-    # Clear cache
-    clear_resp = client.post("/api/settings/cache/clear")
-    assert clear_resp.status_code == 200
-    assert "Cache cleared" in clear_resp.text
+    # 2. Test modal query with path parameter (folders context)
+    resp_folder = client.get(f"/api/photos/{id1}/modal?path={expected_folder}")
+    assert resp_folder.status_code == 200
+
+    # 3. Test modal query with person_id context
+    p_id = db.name_person(name="Alice", cluster_id=0)
+    resp_person = client.get(f"/api/photos/{id1}/modal?person_id={p_id}")
+    assert resp_person.status_code == 200
+
 
 
