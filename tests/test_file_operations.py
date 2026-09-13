@@ -252,3 +252,69 @@ def test_folder_picker_and_modals(test_env):
     resp_rename = client.get(f"/api/files/batch-rename-modal?image_ids={id1}")
     assert resp_rename.status_code == 200
     assert "Batch Rename" in resp_rename.text
+
+
+def test_rename_folder(test_env):
+    db = test_env["db"]
+    client = test_env["client"]
+    pics_dir = test_env["pics_dir"]
+
+    season_dir = pics_dir / "summer"
+    season_dir.mkdir()
+    sub_dir = season_dir / "nested"
+    sub_dir.mkdir()
+
+    f1 = season_dir / "a.jpg"
+    f2 = season_dir / "b.jpg"
+    f3 = sub_dir / "c.jpg"
+    f1.write_text("1")
+    f2.write_text("2")
+    f3.write_text("3")
+
+    id1 = db.insert_image(str(f1), width=100, height=100, file_size=1)
+    id2 = db.insert_image(str(f2), width=100, height=100, file_size=1)
+    id3 = db.insert_image(str(f3), width=100, height=100, file_size=1)
+
+    # Rename folder with nested subfolder
+    resp = client.post(
+        "/api/folders/rename",
+        json={"folder_path": str(season_dir), "new_name": "beach"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "success"
+    assert data["renamed_count"] == 3
+
+    renamed_dir = pics_dir / "beach"
+    assert renamed_dir.exists()
+    assert (renamed_dir / "a.jpg").exists()
+    assert (renamed_dir / "nested" / "c.jpg").exists()
+    assert not season_dir.exists()
+
+    assert db.get_image(id1)["file_path"] == str((renamed_dir / "a.jpg").resolve())
+    assert db.get_image(id2)["file_path"] == str((renamed_dir / "b.jpg").resolve())
+    assert db.get_image(id3)["file_path"] == str((renamed_dir / "nested" / "c.jpg").resolve())
+
+    # Invalid name rejected
+    bad_resp = client.post(
+        "/api/folders/rename",
+        json={"folder_path": str(renamed_dir), "new_name": "../evil"},
+    )
+    assert bad_resp.status_code == 400
+
+    # Renaming onto an existing folder rejected
+    clash = pics_dir / "other"
+    clash.mkdir()
+    bad_resp2 = client.post(
+        "/api/folders/rename",
+        json={"folder_path": str(renamed_dir), "new_name": "other"},
+    )
+    assert bad_resp2.status_code == 400
+
+    # Same-name rename is a no-op success
+    noop_resp = client.post(
+        "/api/folders/rename",
+        json={"folder_path": str(renamed_dir), "new_name": "beach"},
+    )
+    assert noop_resp.status_code == 200
+    assert noop_resp.json()["renamed_count"] == 0

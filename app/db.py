@@ -1356,6 +1356,30 @@ class Database:
                 f"DELETE FROM person_exclusions WHERE person_id = ? AND face_id IN ({placeholders})",
                 [int(person_id)] + [int(fid) for fid in face_ids]
             )
+    def update_folder_paths(self, old_dir: str, new_dir: str) -> List[str]:
+        """Rewrite file_path for every image under old_dir to sit under new_dir after a folder rename.
+
+        Returns the list of old file paths that were updated so callers can invalidate cache.
+        """
+        old_prefix = str(Path(old_dir).resolve())
+        new_prefix = str(Path(new_dir).resolve())
+        escape = old_prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "/%"
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, file_path FROM images WHERE file_path = ? OR file_path LIKE ? ESCAPE '\\'",
+                (old_prefix, escape),
+            )
+            rows = cursor.fetchall()
+            old_paths = [r["file_path"] for r in rows]
+            for r in rows:
+                rel = r["file_path"][len(old_prefix):]
+                cursor.execute(
+                    "UPDATE images SET file_path = ? WHERE id = ?",
+                    (new_prefix + rel, r["id"]),
+                )
+        return old_paths
+
     def update_image_path(self, image_id: int, new_path: str) -> None:
         """Update the file_path of an existing image record on disk move or rename."""
         resolved = str(Path(new_path).resolve())

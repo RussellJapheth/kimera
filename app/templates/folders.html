@@ -45,6 +45,48 @@
 
   <!-- Sort Controls -->
   <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+    {% if folder_info.parent_folder %}
+    <div style="display: flex; align-items: center; gap: 0.35rem;" x-data="{
+      renaming: false,
+      newName: '{{ folder_info.folder_name }}',
+      async performRename() {
+        if (!this.newName.trim() || this.newName === '{{ folder_info.folder_name }}') {
+          this.renaming = false;
+          return;
+        }
+        try {
+          const resp = await fetch('/api/folders/rename', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ folder_path: {{ folder_info.current_folder|tojson }}, new_name: this.newName.trim() })
+          });
+          const data = await resp.json();
+          if (resp.ok) {
+            window.location.href = '/folders?path=' + encodeURIComponent(data.new_parent);
+          } else {
+            alert(data.detail || 'Failed to rename folder');
+          }
+        } catch(e) {
+          alert('Error: ' + e.message);
+        }
+        this.renaming = false;
+      }
+    }">
+      <button type="button" x-show="!renaming" class="btn" style="padding: 0.3rem 0.6rem; font-size: 0.8125rem; display: inline-flex; align-items: center; gap: 0.3rem;" @click="renaming = true" title="Rename this folder">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 20h9"/>
+          <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>
+        </svg>
+        Rename
+      </button>
+      <div x-show="renaming" style="display: flex; align-items: center; gap: 0.35rem;">
+        <input x-model="newName" @keyup.enter="performRename()" @keyup.escape="renaming = false" maxlength="120"
+          style="padding: 0.3rem 0.5rem; font-size: 0.8125rem; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--surface-input, var(--surface-card)); color: var(--text-main); width: 180px;">
+        <button type="button" class="btn" style="padding: 0.3rem 0.6rem; font-size: 0.8125rem;" @click="performRename()">Save</button>
+        <button type="button" class="btn" style="padding: 0.3rem 0.6rem; font-size: 0.8125rem;" @click="renaming = false">Cancel</button>
+      </div>
+    </div>
+    {% endif %}
     <div class="sort-selector" style="display: flex; align-items: center; gap: 0.35rem; background: var(--surface-card); border: 1px solid var(--border-subtle); padding: 0.25rem 0.6rem; border-radius: var(--radius-full); font-size: 0.8125rem;">
       <span style="color: var(--text-dim);">Sort:</span>
       <a href="/folders?path={{ folder_info.current_folder }}&sort=date&order={% if sort_by == 'date' and sort_order == 'desc' %}asc{% else %}desc{% endif %}" class="sort-link {% if sort_by == 'date' %}active{% endif %}">

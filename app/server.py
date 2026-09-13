@@ -1641,6 +1641,46 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         count = db.batch_toggle_favorites(raw_ids, is_favorite)
         return JSONResponse({"status": "success", "count": count, "is_favorite": is_favorite})
 
+    @app.post("/api/folders/rename")
+    async def rename_folder_endpoint(request: Request):
+        payload = await _extract_request_payload(request)
+        folder_path = payload.get("folder_path")
+        new_name = payload.get("new_name")
+
+        if not folder_path or not new_name:
+            raise HTTPException(status_code=400, detail="folder_path and new_name are required")
+
+        new_name = str(new_name).strip()
+        if not new_name or "/" in new_name or "\\" in new_name or ".." in new_name:
+            raise HTTPException(status_code=400, detail="Invalid folder name")
+
+        old_dir = Path(folder_path).resolve()
+        if not old_dir.exists() or not old_dir.is_dir():
+            raise HTTPException(status_code=404, detail="Folder does not exist on disk")
+
+        dest_dir = old_dir.parent / new_name
+        if dest_dir.resolve() == old_dir:
+            return JSONResponse({"status": "success", "renamed_count": 0, "new_path": str(dest_dir.resolve()), "new_parent": str(dest_dir.parent.resolve())})
+
+        if dest_dir.exists():
+            raise HTTPException(status_code=400, detail=f"A folder named '{new_name}' already exists here")
+
+        try:
+            old_dir.rename(dest_dir)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to rename folder: {e}")
+
+        old_paths = db.update_folder_paths(old_dir, dest_dir)
+        for old_p in old_paths:
+            cache.invalidate_media_cache(old_p)
+
+        return JSONResponse({
+            "status": "success",
+            "renamed_count": len(old_paths),
+            "new_path": str(dest_dir.resolve()),
+            "new_parent": str(dest_dir.parent.resolve()),
+        })
+
     @app.get("/api/folders/list")
     async def get_folders_list():
         folders = db.get_all_folder_paths()
