@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from app.cache import ThumbnailCache
 from app.db import Database
 from app.recognition import MultiExemplarMatcher
+from app.scanner import compute_quick_hash, scan_media_paths
 
 APP_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = APP_DIR / "templates"
@@ -223,6 +224,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         page: int = Query(1, ge=1),
         infinite: int = Query(0),
     ):
+        exclude_duplicates = db.get_setting("exclude_duplicates") == "1"
         data = db.get_images(
             filter_type=filter,
             person_id=person_id,
@@ -234,6 +236,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             page=page,
             limit=48,
             tag_id=tag_id,
+            exclude_duplicates=exclude_duplicates,
         )
         active_tab = "favorites" if filter == "favorites" else "photos"
         all_tags = db.get_all_tags()
@@ -314,12 +317,14 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         cur_folder = folders_data["current_folder"]
         
         # Load images directly in current folder (or under it)
+        exclude_duplicates = db.get_setting("exclude_duplicates") == "1"
         images_data = db.get_images(
             folder_path=cur_folder,
             sort_by=sort_by,
             sort_order=sort_order,
             page=page,
             limit=48,
+            exclude_duplicates=exclude_duplicates,
         )
 
         if request.headers.get("HX-Request") and infinite == 1:
@@ -383,6 +388,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         if not person:
             raise HTTPException(status_code=404, detail="Person not found")
 
+        exclude_duplicates = db.get_setting("exclude_duplicates") == "1"
         data = db.get_images(
             filter_type="person",
             person_id=person_id,
@@ -390,6 +396,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             sort_order=sort_order,
             page=page,
             limit=48,
+            exclude_duplicates=exclude_duplicates,
         )
 
         if request.headers.get("HX-Request") and infinite == 1:
@@ -493,6 +500,118 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
                 ✓ Cache cleared! {cache_stats['thumbnail_count']} thumbnails, {cache_stats['total_size_mb']} MB remaining.
             </div>
         """)
+
+    @app.post("/api/settings/exclude-duplicates", response_class=HTMLResponse)
+    async def set_exclude_duplicates(request: Request, exclude_duplicates: str = Form("")):
+        enabled = str(exclude_duplicates).lower() in ("1", "true", "on", "yes")
+        db.set_setting("exclude_duplicates", "1" if enabled else "")
+        checked = "checked" if enabled else ""
+        return HTMLResponse(f"""
+        <div id="exclude-duplicates-control">
+          <div class="alert alert-success" style="background: rgba(16, 185, 129, 0.15); border: 1px solid #10b981; color: #6ee7b7; padding: 0.5rem 0.85rem; border-radius: 8px; margin-bottom: 0.85rem; font-size: 0.8125rem;">
+            ✓ Exclude duplicates {"enabled" if enabled else "disabled"}. Open the gallery to apply.
+          </div>
+          <form hx-post="/api/settings/exclude-duplicates" hx-target="#exclude-duplicates-control" hx-swap="outerHTML">
+            <label class="form-label" style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+              <input type="checkbox" name="exclude_duplicates" value="1" onchange="this.form.requestSubmit()" {checked} style="width: 16px; height: 16px;">
+              Exclude duplicates from gallery
+            </label>
+            <span class="form-help">Show only one file per duplicate group in the media list, even when duplicates sit in different folders.</span>
+          </form>
+        </div>
+        """)
+
+    @app.post("/api/duplicates/scan", response_class=HTMLResponse)
+    async def scan_duplicates_endpoint(request: Request):
+        # 1. Collect indexed records, refreshing fingerprints only when size/mtime changed
+        entries: List[Dict[str, Any]] = []
+        recomputed = 0
+        for rec in db.get_hash_records():
+            p = Path(rec["file_path"])
+            if not p.is_file():
+                continue
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            cached = rec.get("content_hash") or ""
+            if cached and int(rec.get("file_size") or 0) == st.st_size and abs(float(rec.get("mtime") or 0.0) - st.st_mtime) < 0.001:
+                h = cached
+            else:
+                h = compute_quick_hash(p)
+                db.update_image_meta(int(rec["id"]), file_size=st.st_size, mtime=st.st_mtime, content_hash=h)
+                recomputed += 1
+            entries.append({
+                "id": int(rec["id"]),
+                "file_path": rec["file_path"],
+                "filename": p.name,
+                "file_size": st.st_size,
+                "content_hash": h,
+            })
+
+        # 2. Walk the filesystem for media files that are not yet indexed
+        existing_paths = {e["file_path"] for e in entries}
+        new_found = 0
+        input_dir = db.get_setting("input_dir") or (str(Path("pictures").resolve()) if Path("pictures").exists() else str(Path.cwd()))
+        if Path(input_dir).exists():
+            for p in scan_media_paths(input_dir):
+                rp = str(p.resolve())
+                if rp in existing_paths:
+                    continue
+                try:
+                    st = p.stat()
+                except OSError:
+                    continue
+                entries.append({
+                    "id": None,
+                    "file_path": rp,
+                    "filename": p.name,
+                    "file_size": st.st_size,
+                    "content_hash": compute_quick_hash(p),
+                })
+                new_found += 1
+
+        # 3. Group by content fingerprint
+        by_hash: Dict[str, List[Dict[str, Any]]] = {}
+        for e in entries:
+            if e["content_hash"]:
+                by_hash.setdefault(e["content_hash"], []).append(e)
+
+        raw_groups = [g for g in by_hash.values() if len(g) >= 2]
+        raw_groups.sort(key=lambda g: (-len(g), g[0]["file_path"].lower()))
+
+        groups = []
+        total_duplicates = 0
+        for g in raw_groups:
+            g_sorted = sorted(g, key=lambda e: (e["id"] is None, e["id"] or 0))
+            keep, dups = g_sorted[0], g_sorted[1:]
+            total_duplicates += len(dups)
+            for item in g_sorted:
+                item["has_image_id"] = item["id"] is not None
+            groups.append({
+                "content_hash": g[0]["content_hash"],
+                "size": len(g),
+                "keep": keep,
+                "duplicates": dups,
+            })
+
+        results = {
+            "total_files": len(entries),
+            "total_indexed": len([e for e in entries if e["id"] is not None]),
+            "total_groups": len(groups),
+            "total_duplicates": total_duplicates,
+            "new_found": new_found,
+            "groups": groups,
+        }
+        return templates.TemplateResponse(
+            request=request,
+            name="partials/duplicates_results.html",
+            context={
+                "duplicates": results,
+                "recomputed": recomputed,
+                "exclude_duplicates": db.get_setting("exclude_duplicates") == "1",
+            },
+        )
 
     @app.post("/api/scan/trigger", response_class=HTMLResponse)
     async def trigger_scan(
@@ -640,6 +759,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             sort_by=sort_by,
             sort_order=sort_order,
             tag_id=tag_id,
+            exclude_duplicates=db.get_setting("exclude_duplicates") == "1",
         )
 
         return templates.TemplateResponse(
@@ -764,14 +884,18 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
                 "all_tags": all_tags,
                 "img_tags": img_tags,
                 "modal_ctx": {
-                    "filter_type": filter_type,
-                    "search": search,
-                    "person_id": person_id,
-                    "cluster_id": cluster_id,
-                    "folder_path": folder_path,
-                    "sort_by": sort_by,
-                    "sort_order": sort_order,
-                    "ctx_tag_id": ctx_tag_id,
+                    k: v
+                    for k, v in {
+                        "filter_type": filter_type,
+                        "search": search,
+                        "person_id": person_id,
+                        "cluster_id": cluster_id,
+                        "folder_path": folder_path,
+                        "sort_by": sort_by,
+                        "sort_order": sort_order,
+                        "ctx_tag_id": ctx_tag_id,
+                    }.items()
+                    if v is not None
                 },
             },
         )

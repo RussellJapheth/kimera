@@ -281,6 +281,48 @@
   </div>
 </div>
 
+<!-- Scan for Duplicates Section -->
+<div class="settings-card" style="margin-top: 2rem;" id="duplicates-settings-card">
+  <h2 style="font-size: 1.15rem; font-weight: 700; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <rect width="9" height="9" x="2" y="2" rx="2" ry="2"/>
+      <rect width="9" height="9" x="13" y="13" rx="2" ry="2"/>
+    </svg>
+    Scan for Duplicates
+  </h2>
+  <p class="form-help" style="margin-bottom: 1.25rem;">
+    Finds media with identical content, wherever they live. The scan reuses cached content fingerprints written during the last library scan: files whose size and modified time have not changed are never re-read.
+  </p>
+
+  <div style="display: flex; align-items: flex-start; gap: 2rem; flex-wrap: wrap;">
+    <div id="exclude-duplicates-control">
+      <form hx-post="/api/settings/exclude-duplicates" hx-target="#exclude-duplicates-control" hx-swap="outerHTML">
+        <label class="form-label" style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; margin-bottom: 0.25rem;">
+          <input type="checkbox" name="exclude_duplicates" value="1" onchange="this.form.requestSubmit()" {% if settings.get('exclude_duplicates') == '1' %}checked{% endif %} style="width: 16px; height: 16px;">
+          Exclude duplicates from gallery
+        </label>
+        <span class="form-help">Show only one file per duplicate group in the media list, even when duplicates sit in different folders.</span>
+      </form>
+    </div>
+
+    <div style="margin-left: auto;">
+      <button
+        type="button"
+        class="btn btn-primary"
+        style="padding: 0.6rem 1.1rem; font-size: 0.9rem; background: rgba(245, 158, 11, 0.15); border-color: rgba(245, 158, 11, 0.4); color: #fbbf24;"
+        hx-post="/api/duplicates/scan"
+        hx-target="#duplicates-results"
+        hx-swap="innerHTML"
+        title="Compare content fingerprints of all indexed files"
+      >
+        Scan for Duplicates
+      </button>
+    </div>
+  </div>
+
+  <div id="duplicates-results" style="margin-top: 1.25rem;"></div>
+</div>
+
 <script>
 function globalImproveMatchesComponent() {
   return {

@@ -260,6 +260,77 @@ def test_cache_configuration_and_stats(tmp_path: Path):
     assert stats_cleared["thumbnail_count"] == 0
 
 
+def test_duplicates_scan_and_exclude_toggle(tmp_path: Path):
+    """Verify the duplicate scan indexes unindexed disk files, reuses cached hashes, and the toggle dedups the list."""
+    from app.scanner import compute_quick_hash
+
+    db_file = tmp_path / "test_dupes.db"
+    cache_dir = tmp_path / "cache"
+    db = Database(db_file)
+    db.set_setting("input_dir", str(tmp_path))
+
+    dup_a = tmp_path / "folder_a" / "same.jpg"
+    dup_b = tmp_path / "folder_b" / "same_copy.jpg"
+    dup_a.parent.mkdir(parents=True, exist_ok=True)
+    dup_b.parent.mkdir(parents=True, exist_ok=True)
+    dup_a.write_bytes(b"identical content bytes")
+    dup_b.write_bytes(b"identical content bytes")
+
+    for p in (dup_a, dup_b):
+        st = p.stat()
+        db.insert_image(str(p), file_size=st.st_size, mtime=st.st_mtime, content_hash=compute_quick_hash(p))
+
+    # Brand-new file on disk, never indexed in DB
+    dup_c = tmp_path / "folder_c" / "same_new.jpg"
+    dup_c.parent.mkdir(parents=True, exist_ok=True)
+    dup_c.write_bytes(b"identical content bytes")
+
+    app = create_app(db_path=str(db_file), cache_dir=str(cache_dir))
+    client = TestClient(app)
+
+    # Unindexed file found on disk and grouped; indexed hashes reused -> no re-hash
+    resp = client.post("/api/duplicates/scan")
+    assert resp.status_code == 200
+    assert "1 duplicate group(s)" in resp.text
+    assert "out of 3 files reviewed" in resp.text
+    assert "1 new file(s) found on disk" in resp.text
+    assert "no file was re-hashed" in resp.text
+    assert "same_copy.jpg" in resp.text
+    assert "same_new.jpg" in resp.text
+    assert "Not indexed" in resp.text
+
+    # Second scan: same result, indexed fingerprints still fully cached
+    resp_cached = client.post("/api/duplicates/scan")
+    assert "1 new file(s) found on disk" in resp_cached.text
+    assert "no file was re-hashed" in resp_cached.text
+
+    # The on-disk only file is NOT persisted to the DB, so the gallery stays at 2 entries
+    assert db.get_images()["total"] == 2
+
+    # Toggle on -> setting persisted and list deduped to one entry
+    resp_on = client.post("/api/settings/exclude-duplicates", data={"exclude_duplicates": "1"})
+    assert resp_on.status_code == 200
+    assert db.get_setting("exclude_duplicates") == "1"
+
+    listing = db.get_images(exclude_duplicates=True)
+    assert listing["total"] == 1
+
+    # Toggle off restores both indexed entries
+    resp_off = client.post("/api/settings/exclude-duplicates", data={"exclude_duplicates": ""})
+    assert resp_off.status_code == 200
+    assert db.get_setting("exclude_duplicates") == ""
+    assert db.get_images()["total"] == 2
+
+    # Changed content on disk -> scan re-hashes the stale indexed files and still groups them
+    dup_a.write_bytes(b"totally different content, longer now")
+    dup_b.write_bytes(b"totally different content, longer now")
+    dup_c.write_bytes(b"totally different content, longer now")
+    resp_again = client.post("/api/duplicates/scan")
+    assert resp_again.status_code == 200
+    assert "1 duplicate group(s)" in resp_again.text
+    assert "content fingerprint(s) were refreshed" in resp_again.text
+
+
 def test_photo_modal_context_and_folder_link(test_env):
     """Verify modal endpoint respects folder path, person_id, and links to folder."""
     db = test_env["db"]

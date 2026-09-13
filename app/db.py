@@ -159,6 +159,7 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_images_favorite ON images(is_favorite);
                 CREATE INDEX IF NOT EXISTS idx_images_file_path ON images(file_path);
                 CREATE INDEX IF NOT EXISTS idx_images_file_size ON images(file_size);
+                CREATE INDEX IF NOT EXISTS idx_images_content_hash ON images(content_hash);
                 CREATE INDEX IF NOT EXISTS idx_faces_image_id ON faces(image_id);
                 CREATE INDEX IF NOT EXISTS idx_faces_cluster_id ON faces(cluster_id);
                 CREATE INDEX IF NOT EXISTS idx_faces_person_id ON faces(person_id);
@@ -263,6 +264,58 @@ class Database:
             cursor.execute("SELECT id, file_path, file_size, mtime, content_hash, width, height, duration FROM images")
             rows = cursor.fetchall()
             return {str(row["file_path"]): dict(row) for row in rows}
+
+    def get_hash_records(self) -> List[Dict[str, Any]]:
+        """Return id, file_path, file_size, mtime, content_hash for every indexed file."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, file_path, file_size, mtime, content_hash FROM images ORDER BY id ASC"
+            )
+            return [dict(r) for r in cursor.fetchall()]
+
+    def get_duplicate_groups(self) -> Dict[str, Any]:
+        """
+        Group indexed media by content fingerprint and return only groups with 2+ files.
+        The first indexed file (lowest id) is designated as the "keep" record.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, file_path, file_size, content_hash FROM images WHERE content_hash != '' ORDER BY id ASC"
+            )
+            rows = cursor.fetchall()
+
+        by_hash: Dict[str, List[Dict[str, Any]]] = {}
+        for r in rows:
+            rec = dict(r)
+            by_hash.setdefault(rec["content_hash"], []).append(rec)
+
+        raw_groups = [g for g in by_hash.values() if len(g) > 1]
+        raw_groups.sort(key=lambda g: (-len(g), g[0]["file_path"].lower()))
+
+        groups = []
+        total_duplicates = 0
+        for g in raw_groups:
+            keep = g[0]
+            dups = g[1:]
+            total_duplicates += len(dups)
+            groups.append({
+                "content_hash": keep["content_hash"],
+                "size": len(g),
+                "keep": {**keep, "filename": Path(keep["file_path"]).name},
+                "duplicates": [
+                    {**d, "filename": Path(d["file_path"]).name}
+                    for d in dups
+                ],
+            })
+
+        return {
+            "total_groups": len(groups),
+            "total_duplicates": total_duplicates,
+            "total_files": len(rows),
+            "groups": groups,
+        }
 
 
     def update_image_meta(
@@ -464,11 +517,17 @@ class Database:
         page: int = 1,
         limit: int = 60,
         tag_id: Optional[int] = None,
+        exclude_duplicates: bool = False,
     ) -> Dict[str, Any]:
         """Query images with filtering, search, sorting, folder filtering, and pagination."""
         offset = max(0, (page - 1) * limit)
         params: List[Any] = []
         where_clauses: List[str] = []
+
+        if exclude_duplicates:
+            where_clauses.append(
+                "(i.content_hash = '' OR i.id = (SELECT MIN(mi.id) FROM images mi WHERE mi.content_hash = i.content_hash AND mi.content_hash != ''))"
+            )
 
         if filter_type == "favorites":
             where_clauses.append("i.is_favorite = 1")
@@ -573,10 +632,16 @@ class Database:
         sort_by: str = "date",
         sort_order: str = "desc",
         tag_id: Optional[int] = None,
+        exclude_duplicates: bool = False,
     ) -> Dict[str, Optional[int]]:
         """Get previous and next image IDs for modal navigation."""
         params: List[Any] = []
         where_clauses: List[str] = []
+
+        if exclude_duplicates:
+            where_clauses.append(
+                "(i.content_hash = '' OR i.id = (SELECT MIN(mi.id) FROM images mi WHERE mi.content_hash = i.content_hash AND mi.content_hash != ''))"
+            )
 
         if filter_type == "favorites":
             where_clauses.append("i.is_favorite = 1")
@@ -1469,20 +1534,38 @@ class Database:
             return [{"id": r["id"], "name": r["name"]} for r in cursor.fetchall()]
 
     def add_tags_to_image(self, image_id: int, tag_names: List[str]) -> int:
-        """Assign a list of tags to an image. Existing tags are reused. Returns count added."""
+        """Assign a list of tags to an image. Existing tags are reused. Returns count added.
+
+        When the image has a content fingerprint, the tags are also applied to every
+        duplicate of that image (any file sharing the same content hash).
+        """
         tag_ids = [tid for tid in (self.add_tag(name) for name in (tag_names or [])) if tid is not None]
         if not tag_ids:
             return 0
         added = 0
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            for tag_id in tag_ids:
+
+            # Resolve the source image's content hash and propagate to all duplicates
+            cursor.execute("SELECT content_hash FROM images WHERE id = ?", (int(image_id),))
+            row = cursor.fetchone()
+            if row and row["content_hash"]:
                 cursor.execute(
-                    "INSERT OR IGNORE INTO image_tags (image_id, tag_id) VALUES (?, ?)",
-                    (int(image_id), int(tag_id)),
+                    "SELECT id FROM images WHERE content_hash = ?",
+                    (row["content_hash"],),
                 )
-                if cursor.rowcount:
-                    added += 1
+                target_ids = [int(r["id"]) for r in cursor.fetchall()]
+            else:
+                target_ids = [int(image_id)]
+
+            for target_id in target_ids:
+                for tag_id in tag_ids:
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO image_tags (image_id, tag_id) VALUES (?, ?)",
+                        (int(target_id), int(tag_id)),
+                    )
+                    if cursor.rowcount:
+                        added += 1
         return added
 
     def remove_tag_from_image(self, image_id: int, tag_id: int) -> bool:
