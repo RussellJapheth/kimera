@@ -74,3 +74,64 @@ def test_insert_face_and_clustering(temp_db: Database):
     assert inspection["total_faces"] == 1
     assert inspection["total_images"] == 1
     assert inspection["image_paths"] == ["/path/to/family.jpg"]
+
+
+def test_tags_create_and_case_insensitive_reuse(temp_db: Database):
+    tag_id = temp_db.add_tag(" Vacation ")
+    assert tag_id is not None
+
+    same_id = temp_db.add_tag("vacation")
+    assert same_id == tag_id
+
+    assert temp_db.add_tag("   ") is None
+
+
+def test_add_remove_tags_on_image(temp_db: Database):
+    img_id = temp_db.insert_image("/path/to/tagged.jpg")
+
+    added = temp_db.add_tags_to_image(img_id, ["Travel", "family", "travel"])
+    assert added == 2
+
+    tags = temp_db.get_image_tags(img_id)
+    names = [t["name"] for t in tags]
+    assert "Travel" in names
+    assert "family" in names
+
+    assert temp_db.remove_tag_from_image(img_id, tags[0]["id"]) is True
+    assert len(temp_db.get_image_tags(img_id)) == 1
+
+
+def test_get_image_includes_tags(temp_db: Database):
+    img_id = temp_db.insert_image("/path/to/tagged2.jpg")
+    temp_db.add_tags_to_image(img_id, ["Header", "hero"])
+
+    img = temp_db.get_image(img_id)
+    assert {t["name"] for t in img["tags"]} == {"Header", "hero"}
+
+
+def test_tag_filters_images(temp_db: Database):
+    img1 = temp_db.insert_image("/path/to/a.jpg")
+    img2 = temp_db.insert_image("/path/to/b.jpg")
+    img3 = temp_db.insert_image("/path/to/c.jpg")
+    temp_db.add_tags_to_image(img1, ["Trip"])
+    temp_db.add_tags_to_image(img2, ["Trip"])
+
+    trip_tag = temp_db.get_all_tags()[0]
+    result = temp_db.get_images(tag_id=trip_tag["id"])
+    assert result["total"] == 2
+    assert {i["file_path"] for i in result["images"]} == {"/path/to/a.jpg", "/path/to/b.jpg"}
+
+    adj = temp_db.get_adjacent_image_ids(image_id=img1, tag_id=trip_tag["id"])
+    assert adj["current_index"] != -1
+    assert adj["total_count"] == 2
+
+
+def test_image_tags_cascade_on_delete_and_clone(temp_db: Database):
+    img_id = temp_db.insert_image("/path/to/cascade.jpg")
+    temp_db.add_tags_to_image(img_id, ["Keep"])
+
+    cloned_id = temp_db.clone_image_record(img_id, "/path/to/cloned.jpg")
+    assert {t["name"] for t in temp_db.get_image_tags(cloned_id)} == {"Keep"}
+
+    temp_db.delete_image_records([img_id])
+    assert temp_db.get_image_tags(img_id) == []

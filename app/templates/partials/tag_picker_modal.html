@@ -1,0 +1,79 @@
+<div class="target-picker-modal" @click.stop>
+  <div class="target-picker-header">
+    <div>
+      <h3 style="margin: 0; font-size: 1.1rem; font-weight: 700; color: #fff;">Add Tags</h3>
+      <p style="margin: 0.25rem 0 0 0; font-size: 0.8125rem; color: var(--text-muted);">
+        Select existing tag or create a new one. Multiple tags allowed.
+      </p>
+    </div>
+    <button type="button" class="modal-close" @click="closePicker()" title="Close picker">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <line x1="18" y1="6" x2="6" y2="18"/>
+        <line x1="6" y1="6" x2="18" y2="18"/>
+      </svg>
+    </button>
+  </div>
+
+  <!-- Create New Tag -->
+  <div class="target-picker-create-box">
+    <form 
+      hx-post="/api/photos/{{ image_id }}/tags" 
+      hx-target="#modal-container" 
+      hx-swap="innerHTML"
+      hx-vals='{{ modal_ctx|tojson }}'
+      hx-on::after-request='window.openTagPicker({{ image_id }}, {{ modal_ctx|tojson }})'
+      style="display: flex; gap: 0.5rem; align-items: center;"
+    >
+      <input 
+        type="text" 
+        name="tags" 
+        placeholder="Create new tag name..." 
+        class="form-input" 
+        style="flex: 1; padding: 0.45rem 0.75rem; font-size: 0.875rem;"
+        required
+      >
+      <button type="submit" class="btn btn-primary" style="white-space: nowrap; padding: 0.45rem 0.85rem; font-size: 0.875rem;">
+        + Create &amp; Add
+      </button>
+    </form>
+  </div>
+
+  <!-- Existing Tags -->
+  <div class="target-picker-list" style="max-height: 55vh; overflow-y: auto;">
+    {% if all_tags %}
+      <div style="display: flex; flex-wrap: wrap; gap: 0.45rem; padding: 0.25rem 0; align-items: flex-start;">
+        {% for tag in all_tags %}
+          {% set is_added = tag.id in img_tags %}
+          {% set add_vals = {} %}
+          {% set _ = add_vals.update({'tags': tag.name}) %}
+          {% for k, v in modal_ctx.items() %}{% set _ = add_vals.update({k: v}) %}{% endfor %}
+          <button 
+            type="button"
+            class="btn"
+            style="padding: 0.4rem 0.75rem; font-size: 0.8125rem; display: inline-flex; align-items: center; gap: 0.4rem; {{ 'border-color: rgba(99, 102, 241, 0.6); color: #a5b4fc; background: rgba(99, 102, 241, 0.12);' if is_added else '' }}"
+            {% if is_added %}
+              hx-post="/api/photos/{{ image_id }}/tags/{{ tag.id }}/remove"
+              hx-vals='{{ modal_ctx|tojson }}'
+              title="Click to remove tag"
+            {% else %}
+              hx-post="/api/photos/{{ image_id }}/tags"
+              hx-vals='{{ add_vals|tojson }}'
+              title="Click to add tag"
+            {% endif %}
+            hx-target="#modal-container"
+            hx-swap="innerHTML"
+hx-on::after-request='window.openTagPicker({{ image_id }}, {{ modal_ctx|tojson }})'
+          >
+            {{ '✓' if is_added else '+' }}
+            {{ tag.name }}
+            <span style="font-size: 0.7rem; color: var(--text-dim);">{{ tag.photo_count }}</span>
+          </button>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="target-picker-empty-state" style="padding: 1.5rem; color: var(--text-dim); font-size: 0.875rem; text-align: center; border: 1px dashed var(--border-subtle); border-radius: var(--radius-md);">
+        No tags exist yet. Create first tag above.
+      </div>
+    {% endif %}
+  </div>
+</div>

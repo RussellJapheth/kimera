@@ -111,6 +111,20 @@ class Database:
                     FOREIGN KEY (face_id) REFERENCES faces(id) ON DELETE CASCADE,
                     FOREIGN KEY (person_id) REFERENCES people(id) ON DELETE CASCADE
                 );
+
+                CREATE TABLE IF NOT EXISTS tags (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS image_tags (
+                    image_id INTEGER NOT NULL,
+                    tag_id INTEGER NOT NULL,
+                    PRIMARY KEY (image_id, tag_id),
+                    FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE,
+                    FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+                );
             """)
 
             # 2. Run column migrations for older database schemas
@@ -147,6 +161,9 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_faces_person_id ON faces(person_id);
                 CREATE INDEX IF NOT EXISTS idx_person_exclusions_face ON person_exclusions(face_id);
                 CREATE INDEX IF NOT EXISTS idx_person_exclusions_person ON person_exclusions(person_id);
+                CREATE INDEX IF NOT EXISTS idx_image_tags_image ON image_tags(image_id);
+                CREATE INDEX IF NOT EXISTS idx_image_tags_tag ON image_tags(tag_id);
+                CREATE INDEX IF NOT EXISTS idx_tags_name ON tags(name);
             """)
 
             # 4. Migrate and collapse any legacy video keyframe entries (e.g. "...#t=1.23s") to single clean video files
@@ -429,6 +446,7 @@ class Database:
                 key=lambda f: (0 if f["person_id"] is not None else (1 if f["cluster_id"] >= 0 else 2), -f["confidence"])
             )
             img["faces"] = sorted_faces
+            img["tags"] = self.get_image_tags(image_id)
             return img
 
     def get_images(
@@ -442,6 +460,7 @@ class Database:
         sort_order: str = "desc",  # 'desc', 'asc'
         page: int = 1,
         limit: int = 60,
+        tag_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Query images with filtering, search, sorting, folder filtering, and pagination."""
         offset = max(0, (page - 1) * limit)
@@ -457,6 +476,10 @@ class Database:
         elif cluster_id is not None:
             where_clauses.append("i.id IN (SELECT image_id FROM faces WHERE cluster_id = ?)")
             params.append(cluster_id)
+
+        if tag_id is not None:
+            where_clauses.append("i.id IN (SELECT image_id FROM image_tags WHERE tag_id = ?)")
+            params.append(tag_id)
 
         if folder_path:
             norm_folder = str(Path(folder_path).resolve())
@@ -546,6 +569,7 @@ class Database:
         search: Optional[str] = None,
         sort_by: str = "date",
         sort_order: str = "desc",
+        tag_id: Optional[int] = None,
     ) -> Dict[str, Optional[int]]:
         """Get previous and next image IDs for modal navigation."""
         params: List[Any] = []
@@ -559,6 +583,9 @@ class Database:
         elif cluster_id is not None:
             where_clauses.append("i.id IN (SELECT image_id FROM faces WHERE cluster_id = ?)")
             params.append(cluster_id)
+        if tag_id is not None:
+            where_clauses.append("i.id IN (SELECT image_id FROM image_tags WHERE tag_id = ?)")
+            params.append(tag_id)
         if folder_path:
             norm_folder = str(Path(folder_path).resolve())
             where_clauses.append("(i.file_path LIKE ? OR i.file_path LIKE ?)")
@@ -1328,6 +1355,14 @@ class Database:
                         sf["person_id"],
                     ),
                 )
+
+            # Clone all tags for this image
+            cursor.execute("SELECT tag_id FROM image_tags WHERE image_id = ?", (int(source_image_id),))
+            for it in cursor.fetchall():
+                cursor.execute(
+                    "INSERT OR IGNORE INTO image_tags (image_id, tag_id) VALUES (?, ?)",
+                    (new_image_id, int(it["tag_id"])),
+                )
             return new_image_id
 
     def get_all_folder_paths(self) -> List[str]:
@@ -1360,3 +1395,90 @@ class Database:
                 [val] + [int(i) for i in image_ids],
             )
             return cursor.rowcount
+
+    def add_tag(self, name: str) -> Optional[int]:
+        """Create a tag if missing, else return existing tag id. Returns None for blank names."""
+        name = (name or "").strip()
+        if not name:
+            return None
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM tags WHERE LOWER(name) = LOWER(?)", (name,))
+            row = cursor.fetchone()
+            if row:
+                return int(row["id"])
+            cursor.execute("INSERT INTO tags (name) VALUES (?)", (name,))
+            return int(cursor.lastrowid)
+
+    def get_tag(self, tag_id: int) -> Optional[Dict[str, Any]]:
+        """Retrieve a single tag by ID."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT t.id, t.name, COUNT(it.image_id) as photo_count
+                FROM tags t
+                LEFT JOIN image_tags it ON it.tag_id = t.id
+                WHERE t.id = ?
+                GROUP BY t.id
+            """, (int(tag_id),))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return {"id": row["id"], "name": row["name"], "photo_count": row["photo_count"]}
+
+    def get_all_tags(self, search: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Retrieve all tags with photo counts, sorted by name."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            query = """
+                SELECT t.id, t.name, COUNT(it.image_id) as photo_count
+                FROM tags t
+                LEFT JOIN image_tags it ON it.tag_id = t.id
+            """
+            params: List[Any] = []
+            if search and search.strip():
+                query += " WHERE t.name LIKE ?"
+                params.append(f"%{search.strip()}%")
+            query += " GROUP BY t.id ORDER BY t.name COLLATE NOCASE ASC"
+            cursor.execute(query, params)
+            return [{"id": r["id"], "name": r["name"], "photo_count": r["photo_count"]} for r in cursor.fetchall()]
+
+    def get_image_tags(self, image_id: int) -> List[Dict[str, Any]]:
+        """Retrieve tags assigned to an image."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT t.id, t.name
+                FROM tags t
+                JOIN image_tags it ON it.tag_id = t.id
+                WHERE it.image_id = ?
+                ORDER BY t.name COLLATE NOCASE ASC
+            """, (int(image_id),))
+            return [{"id": r["id"], "name": r["name"]} for r in cursor.fetchall()]
+
+    def add_tags_to_image(self, image_id: int, tag_names: List[str]) -> int:
+        """Assign a list of tags to an image. Existing tags are reused. Returns count added."""
+        tag_ids = [tid for tid in (self.add_tag(name) for name in (tag_names or [])) if tid is not None]
+        if not tag_ids:
+            return 0
+        added = 0
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            for tag_id in tag_ids:
+                cursor.execute(
+                    "INSERT OR IGNORE INTO image_tags (image_id, tag_id) VALUES (?, ?)",
+                    (int(image_id), int(tag_id)),
+                )
+                if cursor.rowcount:
+                    added += 1
+        return added
+
+    def remove_tag_from_image(self, image_id: int, tag_id: int) -> bool:
+        """Remove a tag from an image. Returns True if a link was removed."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM image_tags WHERE image_id = ? AND tag_id = ?",
+                (int(image_id), int(tag_id)),
+            )
+            return cursor.rowcount > 0

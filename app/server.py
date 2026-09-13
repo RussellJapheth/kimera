@@ -216,6 +216,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         search: Optional[str] = Query(None),
         person_id: Optional[int] = Query(None),
         cluster_id: Optional[int] = Query(None),
+        tag_id: Optional[int] = Query(None),
         folder_path: Optional[str] = Query(None),
         sort_by: str = Query("date", alias="sort"),
         sort_order: str = Query("desc", alias="order"),
@@ -232,8 +233,11 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             sort_order=sort_order,
             page=page,
             limit=48,
+            tag_id=tag_id,
         )
         active_tab = "favorites" if filter == "favorites" else "photos"
+        all_tags = db.get_all_tags()
+        active_tag = db.get_tag(tag_id) if tag_id is not None else None
         
         # If cluster_id is specified, fetch cluster info for top rename banner
         cluster_info = None
@@ -268,6 +272,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
                     "folder_path": folder_path,
                     "sort_by": sort_by,
                     "sort_order": sort_order,
+                    "tag_id": tag_id,
                     "target_url": "/",
                 },
             )
@@ -291,6 +296,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
                 "sort_by": sort_by,
                 "sort_order": sort_order,
                 "active_page": active_tab,
+                "active_tag": active_tag,
+                "all_tags": all_tags,
             },
         )
 
@@ -609,6 +616,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         folder_path: Optional[str] = None,
         sort_by: str = "date",
         sort_order: str = "desc",
+        tag_id: Optional[int] = None,
     ) -> HTMLResponse:
         img_meta = db.get_image(image_id)
         if not img_meta:
@@ -626,6 +634,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             search=search,
             sort_by=sort_by,
             sort_order=sort_order,
+            tag_id=tag_id,
         )
 
         return templates.TemplateResponse(
@@ -644,6 +653,17 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
                 "folder_path": folder_path,
                 "sort_by": sort_by,
                 "sort_order": sort_order,
+                "tag_id": tag_id,
+                "modal_ctx": {
+                    "filter_type": filter_type,
+                    "search": search,
+                    "person_id": person_id,
+                    "cluster_id": cluster_id,
+                    "folder_path": folder_path,
+                    "sort_by": sort_by,
+                    "sort_order": sort_order,
+                    "ctx_tag_id": tag_id,
+                },
             },
         )
 
@@ -659,6 +679,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         path: Optional[str] = Query(None),
         sort_by: str = Query("date", alias="sort"),
         sort_order: str = Query("desc", alias="order"),
+        tag_id: Optional[int] = Query(None),
     ):
         effective_folder = folder_path or path
         return _render_photo_modal_response(
@@ -671,6 +692,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             folder_path=effective_folder,
             sort_by=sort_by,
             sort_order=sort_order,
+            tag_id=tag_id,
         )
 
     @app.post("/api/photos/{image_id}/favorite", response_class=HTMLResponse)
@@ -705,6 +727,105 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             request=request,
             name="partials/photo_card.html",
             context={"image": img_meta},
+        )
+
+    @app.get("/api/tags/list")
+    async def get_tags_list(search: Optional[str] = Query(None)):
+        return JSONResponse({"tags": db.get_all_tags(search=search)})
+
+    @app.get("/api/tags/picker", response_class=HTMLResponse)
+    async def get_tag_picker(
+        request: Request,
+        image_id: int = Query(...),
+        filter_type: str = Query("all"),
+        search: Optional[str] = Query(None),
+        person_id: Optional[int] = Query(None),
+        cluster_id: Optional[int] = Query(None),
+        folder_path: Optional[str] = Query(None),
+        sort_by: str = Query("date"),
+        sort_order: str = Query("desc"),
+        ctx_tag_id: Optional[int] = Query(None),
+    ):
+        img = db.get_image(image_id)
+        if not img:
+            raise HTTPException(status_code=404, detail="Image not found")
+        all_tags = db.get_all_tags()
+        img_tags = {t["id"] for t in img.get("tags", [])}
+        return templates.TemplateResponse(
+            request=request,
+            name="partials/tag_picker_modal.html",
+            context={
+                "image_id": image_id,
+                "all_tags": all_tags,
+                "img_tags": img_tags,
+                "modal_ctx": {
+                    "filter_type": filter_type,
+                    "search": search,
+                    "person_id": person_id,
+                    "cluster_id": cluster_id,
+                    "folder_path": folder_path,
+                    "sort_by": sort_by,
+                    "sort_order": sort_order,
+                    "ctx_tag_id": ctx_tag_id,
+                },
+            },
+        )
+
+    @app.post("/api/photos/{image_id}/tags", response_class=HTMLResponse)
+    async def add_tags_to_photo(
+        request: Request,
+        image_id: int,
+        tags: str = Form(""),
+        filter_type: str = Form("all"),
+        search: Optional[str] = Form(None),
+        person_id: Optional[int] = Form(None),
+        cluster_id: Optional[int] = Form(None),
+        folder_path: Optional[str] = Form(None),
+        sort_by: str = Form("date"),
+        sort_order: str = Form("desc"),
+        ctx_tag_id: Optional[int] = Form(None),
+    ):
+        tag_names = [t.strip() for t in tags.split(",") if t.strip()]
+        db.add_tags_to_image(image_id, tag_names)
+        return _render_photo_modal_response(
+            request=request,
+            image_id=image_id,
+            filter_type=filter_type,
+            search=search,
+            person_id=person_id,
+            cluster_id=cluster_id,
+            folder_path=folder_path,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            tag_id=ctx_tag_id,
+        )
+
+    @app.post("/api/photos/{image_id}/tags/{tag_id}/remove", response_class=HTMLResponse)
+    async def remove_tag_from_photo(
+        request: Request,
+        image_id: int,
+        tag_id: int,
+        filter_type: str = Form("all"),
+        search: Optional[str] = Form(None),
+        person_id: Optional[int] = Form(None),
+        cluster_id: Optional[int] = Form(None),
+        folder_path: Optional[str] = Form(None),
+        sort_by: str = Form("date"),
+        sort_order: str = Form("desc"),
+        ctx_tag_id: Optional[int] = Form(None),
+    ):
+        db.remove_tag_from_image(image_id, tag_id)
+        return _render_photo_modal_response(
+            request=request,
+            image_id=image_id,
+            filter_type=filter_type,
+            search=search,
+            person_id=person_id,
+            cluster_id=cluster_id,
+            folder_path=folder_path,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            tag_id=ctx_tag_id,
         )
 
     @app.get("/api/faces/{face_id}/crop")

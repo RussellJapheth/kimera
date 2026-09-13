@@ -25,6 +25,7 @@
     window.closeModal = (fromPopState = false) => this.closeModal(fromPopState);
     window.openFolderPicker = (action, idsStr) => this.openFolderPicker(action, idsStr);
     window.openBatchRename = (idsStr) => this.openBatchRename(idsStr);
+    window.openTagPicker = (imageId, ctx = null) => this.openTagPicker(imageId, ctx);
     window.bulkSelection = {
       clear: () => this.clearSelection(),
       getIds: () => this.selectedIds
@@ -79,6 +80,19 @@
   openBatchRename(idsStr) {
     this.activePicker = true;
     const url = '/api/files/batch-rename-modal?image_ids=' + encodeURIComponent(idsStr);
+    htmx.ajax('GET', url, {target: '#picker-container', swap: 'innerHTML'});
+  },
+  openTagPicker(imageId, ctx = null) {
+    this.activePicker = true;
+    let url = '/api/tags/picker?image_id=' + encodeURIComponent(imageId);
+    if (ctx) {
+      const s = new URLSearchParams();
+      for (const k of Object.keys(ctx)) {
+        const v = ctx[k];
+        if (v !== null && v !== undefined && v !== '') s.set(k, v);
+      }
+      url += '&' + s.toString();
+    }
     htmx.ajax('GET', url, {target: '#picker-container', swap: 'innerHTML'});
   },
   async batchFavorite(ids, isFav) {
