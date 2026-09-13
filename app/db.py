@@ -12,6 +12,9 @@ import numpy as np
 
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".m4v"}
 
+LOW_QUALITY_FACE_MIN_SIDE = 48
+LOW_QUALITY_FACE_MIN_CONF = 0.70
+
 
 def format_file_size(size_bytes: int | float | None) -> str:
     """Format byte count into human-readable size string (e.g. '12.4 MB')."""
@@ -720,7 +723,7 @@ class Database:
             "direct_images_count": direct_images_count,
         }
 
-    def get_people(self, search: Optional[str] = None, cluster_limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    def get_people(self, search: Optional[str] = None, cluster_limit: Optional[int] = None, hide_low_quality: bool = False) -> List[Dict[str, Any]]:
         """Retrieve all people and unnamed clusters with face count, photo count, and cover face ID."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -751,6 +754,13 @@ class Database:
 
             # 2. Then include unnamed clusters that have cluster_id >= 0 but no person_id
             cluster_limit_sql = f"LIMIT {int(cluster_limit)}" if cluster_limit else ""
+            cluster_quality_filter = ""
+            cluster_having = ""
+            cluster_params: List[Any] = []
+            if hide_low_quality:
+                cluster_quality_filter = " AND (f.box_x2 - f.box_x1) >= ? AND (f.box_y2 - f.box_y1) >= ? AND f.confidence >= ?"
+                cluster_having = " HAVING COUNT(DISTINCT f.image_id) > 1"
+                cluster_params = [LOW_QUALITY_FACE_MIN_SIDE, LOW_QUALITY_FACE_MIN_SIDE, LOW_QUALITY_FACE_MIN_CONF]
             cluster_query = f"""
                 SELECT f.cluster_id,
                        COUNT(DISTINCT f.id) as face_count,
@@ -758,11 +768,13 @@ class Database:
                        MIN(f.id) as cover_face_id
                 FROM faces f
                 WHERE f.cluster_id >= 0 AND f.person_id IS NULL
+                {cluster_quality_filter}
                 GROUP BY f.cluster_id
+                {cluster_having}
                 ORDER BY photo_count DESC, face_count DESC
                 {cluster_limit_sql}
             """
-            cursor.execute(cluster_query)
+            cursor.execute(cluster_query, cluster_params)
             for r in cursor.fetchall():
                 people.append({
                     "id": r["cluster_id"],

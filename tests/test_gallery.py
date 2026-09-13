@@ -71,6 +71,26 @@ def test_favorites_and_filtering(test_env):
     assert res["total"] == 0
 
 
+def test_get_people_hides_low_quality_clusters(test_env):
+    db = test_env["db"]
+    emb = np.random.randn(512).astype(np.float32)
+
+    # Tiny, low-confidence face in cluster 7
+    db.insert_face(test_env["id1"], bbox=(5, 5, 25, 25), confidence=0.55, embedding=emb, cluster_id=7)
+
+    # Good-quality faces but all in the same single image (cluster 8)
+    db.insert_face(test_env["id1"], bbox=(200, 200, 250, 250), confidence=0.95, embedding=emb, cluster_id=8)
+    db.insert_face(test_env["id1"], bbox=(300, 300, 350, 350), confidence=0.93, embedding=emb, cluster_id=8)
+
+    assert 7 in {p["id"] for p in db.get_people()}
+    assert 8 in {p["id"] for p in db.get_people()}
+
+    hidden = db.get_people(hide_low_quality=True)
+    assert 7 not in {p["id"] for p in hidden}
+    assert 8 not in {p["id"] for p in hidden}
+    assert 0 in {p["id"] for p in hidden}
+
+
 def test_people_naming_and_merging(test_env):
     db = test_env["db"]
     f1 = test_env["f1"]

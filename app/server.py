@@ -356,13 +356,16 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
 
     @app.get("/people", response_class=HTMLResponse)
     async def people_view(request: Request, search: Optional[str] = Query(None)):
-        people = db.get_people(search=search)
+        saved_settings = db.get_all_settings()
+        hide_low_quality = saved_settings.get("hide_low_quality_faces") == "1"
+        people = db.get_people(search=search, hide_low_quality=hide_low_quality)
         return templates.TemplateResponse(
             request=request,
             name="people.html",
             context={
                 "people": people,
                 "search": search,
+                "hide_low_quality": hide_low_quality,
                 "active_page": "people",
             },
         )
@@ -451,6 +454,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         algorithm: str = Form("agglomerative"),
         min_interval_sec: float = Form(60.0),
         recognition_match_threshold: float = Form(0.42),
+        hide_low_quality_faces: str = Form(""),
     ):
         db.set_settings({
             "input_dir": input_dir,
@@ -460,6 +464,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             "algorithm": algorithm,
             "min_interval_sec": str(min_interval_sec),
             "recognition_match_threshold": str(recognition_match_threshold),
+            "hide_low_quality_faces": "1" if str(hide_low_quality_faces).lower() in ("1", "true", "on", "yes") else "",
         })
         return HTMLResponse("""
             <div class="alert alert-success" style="background: rgba(16, 185, 129, 0.15); border: 1px solid #10b981; color: #6ee7b7; padding: 0.6rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.875rem;">
