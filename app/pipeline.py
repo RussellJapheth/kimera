@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 from app.clustering import cluster_embeddings
 from app.db import Database
-from app.models import FaceDetector, FaceEmbedder
+from app.models import FaceDetector, FaceEmbedder, get_media_embedder
 from app.recognition import MultiExemplarMatcher
 from app.scanner import (
     compute_quick_hash,
@@ -279,12 +279,16 @@ def run_pipeline(
                         video_image_id = task.image_id
                         vid_w, vid_h = 0, 0
                         vid_dur = get_video_duration(task.path)
+                        vid_frames: List[np.ndarray] = []
                         for kf in extract_video_keyframes(
                             task.path,
                             scene_threshold=scene_threshold,
                             min_interval_sec=min_interval_sec,
                             max_interval_sec=max_interval_sec,
                         ):
+                            if len(vid_frames) < 3:
+                                vid_frames.append(kf.frame_rgb)
+
                             if video_image_id is None:
                                 vid_h, vid_w, _ = kf.frame_rgb.shape
                                 video_image_id = db.insert_image(
@@ -295,7 +299,7 @@ def run_pipeline(
                                     mtime=task.mtime,
                                     content_hash=task.content_hash,
                                     duration=vid_dur,
-                                )
+                                    )
 
                             detected_faces = det.detect(kf.frame_rgb)
                             for face in detected_faces:
@@ -310,7 +314,7 @@ def run_pipeline(
                                 cache.save_face_crop_from_array(face_id, kf.frame_rgb, face.bbox)
 
                         if video_image_id is None:
-                            db.insert_image(
+                            video_image_id = db.insert_image(
                                 task.path_str,
                                 width=0,
                                 height=0,
@@ -329,6 +333,16 @@ def run_pipeline(
                                 height=vid_h,
                                 duration=vid_dur,
                             )
+
+                        # Compute and save visual embedding for video
+                        try:
+                            v_embedder = get_media_embedder(auto_download=False)
+                            if v_embedder is not None and video_image_id is not None and vid_frames:
+                                v_emb = v_embedder.embed_video_frames(vid_frames)
+                                if v_emb is not None:
+                                    db.save_media_embedding(video_image_id, v_emb)
+                        except Exception:
+                            pass
                     else:
                         # Image file
                         if img_rgb is None:
@@ -366,6 +380,15 @@ def run_pipeline(
                                 embedding=vec,
                                 cluster_id=-1,
                             )
+
+                        # Compute and save visual embedding for image
+                        try:
+                            v_embedder = get_media_embedder(auto_download=False)
+                            if v_embedder is not None and image_id is not None:
+                                v_emb = v_embedder.embed_image(img_rgb)
+                                db.save_media_embedding(image_id, v_emb)
+                        except Exception:
+                            pass
 
                     pbar.update(1)
         finally:
@@ -455,3 +478,84 @@ def run_pipeline(
                 cv2.imwrite(str(dest_dir / out_name), crop_bgr)
 
     return db.get_summary_stats()
+
+
+def index_missing_media_embeddings(
+    db: Database,
+    progress_callback: Optional[Callable] = None,
+) -> int:
+    """
+    Compute and save visual embeddings for all media files in the library
+    that currently lack an entry in media_embeddings.
+    Returns the number of embeddings successfully generated.
+    """
+    missing_ids = db.get_unembedded_image_ids()
+    if not missing_ids:
+        if progress_callback:
+            try:
+                progress_callback("All media embeddings up to date.", 100, 0, 0)
+            except Exception:
+                pass
+        return 0
+
+    embedder = get_media_embedder(auto_download=True)
+    if embedder is None:
+        if progress_callback:
+            try:
+                progress_callback("CLIP vision model unavailable.", 0, 0, len(missing_ids))
+            except Exception:
+                pass
+        return 0
+
+    total = len(missing_ids)
+    indexed = 0
+    for idx, img_id in enumerate(missing_ids):
+        pct = int(((idx + 1) / total) * 100)
+        img_info = db.get_image(img_id)
+        if not img_info:
+            continue
+
+        file_path = Path(img_info["file_path"])
+        if not file_path.exists():
+            continue
+
+        if progress_callback:
+            try:
+                progress_callback(
+                    f"Indexing visual embedding ({idx + 1}/{total}): {file_path.name}",
+                    pct,
+                    idx + 1,
+                    total,
+                )
+            except Exception:
+                pass
+
+        try:
+            if img_info.get("is_video"):
+                frames = []
+                for kf in extract_video_keyframes(file_path, min_interval_sec=5.0, max_interval_sec=30.0):
+                    frames.append(kf.frame_rgb)
+                    if len(frames) >= 3:
+                        break
+                if frames:
+                    emb = embedder.embed_video_frames(frames)
+                    if emb is not None:
+                        db.save_media_embedding(img_id, emb)
+                        indexed += 1
+            else:
+                img_rgb = load_image_rgb(file_path)
+                if img_rgb is not None:
+                    emb = embedder.embed_image(img_rgb)
+                    db.save_media_embedding(img_id, emb)
+                    indexed += 1
+        except Exception as e:
+            print(f"Error embedding media {img_id}: {e}")
+
+    if progress_callback:
+        try:
+            progress_callback(f"Successfully generated {indexed} visual embeddings.", 100, total, total)
+        except Exception:
+            pass
+
+    return indexed
+

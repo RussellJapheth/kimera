@@ -1,4 +1,4 @@
-<div class="photo-card {% if image.is_favorite %}is-fav{% endif %} {% if image.is_video %}is-video{% endif %}" :class="{ 'is-selected': isSelected({{ image.id }}) }" id="photo-card-{{ image.id }}">
+<div class="photo-card {% if image.is_favorite %}is-fav{% endif %} {% if image.is_video %}is-video{% endif %} {% if image.is_target %}is-similar-target{% endif %}" :class="{ 'is-selected': isSelected({{ image.id }}) }" id="photo-card-{{ image.id }}" {% if image.is_target %}style="box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.7);"{% endif %}>
   <img src="/api/photos/{{ image.id }}/thumbnail" alt="{{ image.filename }}" loading="lazy" @click="openModal({{ image.id }})">
   
   {% if image.is_video %}
@@ -26,7 +26,7 @@
           <span class="card-select-custom"></span>
         </label>
 
-        {% if image.face_count > 0 %}
+        {% if image.face_count and image.face_count > 0 %}
           <span class="face-badge" title="{{ image.face_count }} face(s) detected">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
               <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
@@ -54,7 +54,15 @@
     <div class="card-bottom" @click="openModal({{ image.id }})">
       <div class="card-meta-line">
         <span class="card-info" title="{{ image.filename }}">{{ image.filename }}</span>
-        {% if image.formatted_size and image.formatted_size != '0 B' %}
+        {% if image.is_target %}
+          <span class="similarity-pill" style="background: rgba(99, 102, 241, 0.35); border: 1px solid rgba(129, 140, 248, 0.6); color: #c7d2fe; font-size: 0.65rem; font-weight: 700; padding: 0.1rem 0.45rem; border-radius: 9999px; text-transform: uppercase; letter-spacing: 0.04em;" title="Main Media being compared">
+            Main
+          </span>
+        {% elif image.similarity_pct is defined and image.similarity_pct is not none %}
+          <span class="similarity-pill" style="background: rgba(16, 185, 129, 0.25); border: 1px solid rgba(16, 185, 129, 0.45); color: #6ee7b7; font-size: 0.65rem; font-weight: 600; padding: 0.1rem 0.4rem; border-radius: 9999px;" title="Visual similarity: {{ image.similarity_pct }}%">
+            {{ image.similarity_pct }}%
+          </span>
+        {% elif image.formatted_size and image.formatted_size != '0 B' %}
           <span class="card-size-pill">{{ image.formatted_size }}</span>
         {% endif %}
       </div>

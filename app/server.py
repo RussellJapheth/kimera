@@ -130,6 +130,59 @@ class ScanManager:
                 self.logs.append(f"Failed with exception: {e}")
 
 
+class EmbeddingManager:
+    """Manages background generation of visual embeddings for unindexed media."""
+
+    def __init__(self, db_path: str = "face_clusters.db"):
+        self.db_path = db_path
+        self.is_running = False
+        self.status = "idle"  # idle, running, completed, error
+        self.progress_message = "Ready"
+        self.percent = 0
+        self.current_count = 0
+        self.total_count = 0
+        self.error: Optional[str] = None
+        self._lock = threading.Lock()
+
+    def start_indexing(self) -> bool:
+        with self._lock:
+            if self.is_running:
+                return False
+            self.is_running = True
+            self.status = "running"
+            self.progress_message = "Starting visual embedding indexing..."
+            self.percent = 0
+            self.error = None
+
+        thread = threading.Thread(target=self._run_thread, daemon=True)
+        thread.start()
+        return True
+
+    def _on_progress(self, msg: str, percent: int = 0, current: int = 0, total: int = 0) -> None:
+        with self._lock:
+            self.progress_message = msg
+            self.percent = max(0, min(100, percent))
+            self.current_count = current
+            self.total_count = total
+
+    def _run_thread(self) -> None:
+        from app.pipeline import index_missing_media_embeddings
+        try:
+            db = Database(self.db_path)
+            indexed = index_missing_media_embeddings(db, progress_callback=self._on_progress)
+            with self._lock:
+                self.is_running = False
+                self.status = "completed"
+                self.percent = 100
+                self.progress_message = f"Indexed {indexed} visual embeddings successfully."
+        except Exception as e:
+            with self._lock:
+                self.is_running = False
+                self.status = "error"
+                self.error = str(e)
+                self.progress_message = f"Embedding indexing error: {e}"
+
+
 class DeleteFilesRequest(BaseModel):
     image_ids: List[int]
 
@@ -206,6 +259,11 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
     cache = ThumbnailCache(resolved_cache_dir)
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     scan_mgr = ScanManager(db_path, cache_dir=resolved_cache_dir)
+    embedding_mgr = EmbeddingManager(db_path)
+
+    # On server start/restart: trigger background download of CLIP vision model if missing
+    from app.models import trigger_clip_download_async
+    trigger_clip_download_async()
 
     # Mount static assets
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -219,25 +277,49 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         cluster_id: Optional[int] = Query(None),
         tag_id: Optional[int] = Query(None),
         folder_path: Optional[str] = Query(None),
+        similar_to: Optional[int] = Query(None),
+        threshold: Optional[float] = Query(None),
         sort_by: str = Query("date", alias="sort"),
         sort_order: str = Query("desc", alias="order"),
         page: int = Query(1, ge=1),
         infinite: int = Query(0),
     ):
         exclude_duplicates = db.get_setting("exclude_duplicates") == "1"
-        data = db.get_images(
-            filter_type=filter,
-            person_id=person_id,
-            cluster_id=cluster_id,
-            folder_path=folder_path,
-            search=search,
-            sort_by=sort_by,
-            sort_order=sort_order,
-            page=page,
-            limit=48,
-            tag_id=tag_id,
-            exclude_duplicates=exclude_duplicates,
-        )
+
+        similar_to_image = None
+        if similar_to is not None:
+            active_threshold = threshold
+            if active_threshold is None:
+                try:
+                    active_threshold = float(db.get_setting("similarity_threshold", 0.60))
+                except (TypeError, ValueError):
+                    active_threshold = 0.60
+
+            data = db.get_similar_images(
+                image_id=similar_to,
+                limit=48,
+                threshold=active_threshold,
+                page=page,
+                exclude_duplicates=exclude_duplicates,
+            )
+            similar_to_image = data.get("target_image")
+            data["has_next"] = data["page"] < data["total_pages"]
+            data["has_prev"] = data["page"] > 1
+        else:
+            data = db.get_images(
+                filter_type=filter,
+                person_id=person_id,
+                cluster_id=cluster_id,
+                folder_path=folder_path,
+                search=search,
+                sort_by=sort_by,
+                sort_order=sort_order,
+                page=page,
+                limit=48,
+                tag_id=tag_id,
+                exclude_duplicates=exclude_duplicates,
+            )
+
         active_tab = "favorites" if filter == "favorites" else "photos"
         all_tags = db.get_all_tags()
         active_tag = db.get_tag(tag_id) if tag_id is not None else None
@@ -273,6 +355,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
                     "person_id": person_id,
                     "cluster_id": cluster_id,
                     "folder_path": folder_path,
+                    "similar_to": similar_to,
+                    "similar_to_image": similar_to_image,
                     "sort_by": sort_by,
                     "sort_order": sort_order,
                     "tag_id": tag_id,
@@ -296,6 +380,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
                 "cluster_id": cluster_id,
                 "cluster_info": cluster_info,
                 "folder_path": folder_path,
+                "similar_to": similar_to,
+                "similar_to_image": similar_to_image,
                 "sort_by": sort_by,
                 "sort_order": sort_order,
                 "active_page": active_tab,
@@ -437,6 +523,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         saved_settings = db.get_all_settings()
         default_dir = saved_settings.get("input_dir") or (str(Path("pictures").resolve()) if Path("pictures").exists() else str(Path.cwd()))
         cache_stats = cache.get_cache_stats()
+        embedding_stats = db.get_media_embedding_stats()
         return templates.TemplateResponse(
             request=request,
             name="settings.html",
@@ -447,9 +534,39 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
                 "cache_dir": str(cache.cache_dir),
                 "cache_stats": cache_stats,
                 "scan_mgr": scan_mgr,
+                "embedding_mgr": embedding_mgr,
+                "embedding_stats": embedding_stats,
                 "active_page": "settings",
             },
         )
+
+    @app.post("/api/embeddings/generate-all")
+    async def generate_all_embeddings():
+        if embedding_mgr.is_running:
+            return {"status": "already_running", "message": embedding_mgr.progress_message}
+        started = embedding_mgr.start_indexing()
+        return {"status": "started" if started else "failed"}
+
+    @app.get("/api/embeddings/status")
+    async def get_embeddings_status():
+        stats = db.get_media_embedding_stats()
+        return {
+            "is_running": embedding_mgr.is_running,
+            "status": embedding_mgr.status,
+            "percent": embedding_mgr.percent,
+            "current": embedding_mgr.current_count,
+            "total": embedding_mgr.total_count,
+            "message": embedding_mgr.progress_message,
+            "error": embedding_mgr.error,
+            "stats": stats,
+        }
+
+    @app.get("/api/photos/{image_id}/suggested-tags")
+    async def get_photo_suggested_tags(image_id: int):
+        try:
+            return {"suggested_tags": db.suggest_tags_for_image(image_id, top_k=8, min_score=0.50)}
+        except Exception as e:
+            return {"suggested_tags": [], "error": str(e)}
 
     @app.post("/api/settings/save", response_class=HTMLResponse)
     async def save_settings_endpoint(
@@ -461,6 +578,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         algorithm: str = Form("agglomerative"),
         min_interval_sec: float = Form(60.0),
         recognition_match_threshold: float = Form(0.42),
+        similarity_threshold: float = Form(0.60),
         hide_low_quality_faces: str = Form(""),
     ):
         db.set_settings({
@@ -471,6 +589,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             "algorithm": algorithm,
             "min_interval_sec": str(min_interval_sec),
             "recognition_match_threshold": str(recognition_match_threshold),
+            "similarity_threshold": str(similarity_threshold),
             "hide_low_quality_faces": "1" if str(hide_low_quality_faces).lower() in ("1", "true", "on", "yes") else "",
         })
         return HTMLResponse("""
@@ -738,6 +857,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         person_id: Optional[int] = None,
         cluster_id: Optional[int] = None,
         folder_path: Optional[str] = None,
+        similar_to: Optional[int] = None,
+        threshold: Optional[float] = None,
         sort_by: str = "date",
         sort_order: str = "desc",
         tag_id: Optional[int] = None,
@@ -755,12 +876,19 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             person_id=person_id,
             cluster_id=cluster_id,
             folder_path=folder_path,
+            similar_to=similar_to,
+            threshold=threshold,
             search=search,
             sort_by=sort_by,
             sort_order=sort_order,
             tag_id=tag_id,
             exclude_duplicates=db.get_setting("exclude_duplicates") == "1",
         )
+
+        try:
+            suggested_tags = db.suggest_tags_for_image(image_id, top_k=6, min_score=0.50)
+        except Exception:
+            suggested_tags = []
 
         return templates.TemplateResponse(
             request=request,
@@ -776,15 +904,20 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
                 "person_id": person_id,
                 "cluster_id": cluster_id,
                 "folder_path": folder_path,
+                "similar_to": similar_to,
+                "threshold": threshold,
                 "sort_by": sort_by,
                 "sort_order": sort_order,
                 "tag_id": tag_id,
+                "suggested_tags": suggested_tags,
                 "modal_ctx": {
                     "filter_type": filter_type,
                     "search": search,
                     "person_id": person_id,
                     "cluster_id": cluster_id,
                     "folder_path": folder_path,
+                    "similar_to": similar_to,
+                    "threshold": threshold,
                     "sort_by": sort_by,
                     "sort_order": sort_order,
                     "ctx_tag_id": tag_id,
@@ -802,6 +935,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         cluster_id: Optional[int] = Query(None),
         folder_path: Optional[str] = Query(None),
         path: Optional[str] = Query(None),
+        similar_to: Optional[int] = Query(None),
+        threshold: Optional[float] = Query(None),
         sort_by: str = Query("date", alias="sort"),
         sort_order: str = Query("desc", alias="order"),
         tag_id: Optional[int] = Query(None),
@@ -815,6 +950,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             person_id=person_id,
             cluster_id=cluster_id,
             folder_path=effective_folder,
+            similar_to=similar_to,
+            threshold=threshold,
             sort_by=sort_by,
             sort_order=sort_order,
             tag_id=tag_id,
@@ -910,6 +1047,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         person_id: Optional[int] = Form(None),
         cluster_id: Optional[int] = Form(None),
         folder_path: Optional[str] = Form(None),
+        similar_to: Optional[int] = Form(None),
+        threshold: Optional[float] = Form(None),
         sort_by: str = Form("date"),
         sort_order: str = Form("desc"),
         ctx_tag_id: Optional[int] = Form(None),
@@ -924,6 +1063,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             person_id=person_id,
             cluster_id=cluster_id,
             folder_path=folder_path,
+            similar_to=similar_to,
+            threshold=threshold,
             sort_by=sort_by,
             sort_order=sort_order,
             tag_id=ctx_tag_id,
@@ -939,6 +1080,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         person_id: Optional[int] = Form(None),
         cluster_id: Optional[int] = Form(None),
         folder_path: Optional[str] = Form(None),
+        similar_to: Optional[int] = Form(None),
+        threshold: Optional[float] = Form(None),
         sort_by: str = Form("date"),
         sort_order: str = Form("desc"),
         ctx_tag_id: Optional[int] = Form(None),
@@ -952,6 +1095,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             person_id=person_id,
             cluster_id=cluster_id,
             folder_path=folder_path,
+            similar_to=similar_to,
+            threshold=threshold,
             sort_by=sort_by,
             sort_order=sort_order,
             tag_id=ctx_tag_id,

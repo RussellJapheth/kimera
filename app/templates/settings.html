@@ -38,6 +38,11 @@
     <div class="stat-card-val" style="color: #f59e0b;">{{ stats.favorites_count }}</div>
     <div class="stat-card-sub">Starred items</div>
   </div>
+  <div class="stat-card">
+    <div class="stat-card-title">Visual Embeddings</div>
+    <div class="stat-card-val" style="color: #38bdf8;">{{ embedding_stats.embedded_images if embedding_stats else 0 }}</div>
+    <div class="stat-card-sub">{{ embedding_stats.missing if embedding_stats else 0 }} unindexed</div>
+  </div>
 </div>
 
 <!-- Settings & Rescan Form Section -->
@@ -152,6 +157,20 @@
             class="form-input"
           >
           <span class="form-help">Multi-exemplar cosine distance match threshold (default: 0.42)</span>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Visual Similarity Threshold</label>
+          <input 
+            type="number" 
+            name="similarity_threshold" 
+            value="{{ settings.get('similarity_threshold', '0.60') }}" 
+            min="0.10" 
+            max="0.95" 
+            step="0.01" 
+            class="form-input"
+          >
+          <span class="form-help">Minimum cosine similarity for visual similarity search & tag recommendations (default: 0.60)</span>
         </div>
       </div>
 
@@ -277,6 +296,91 @@
           </button>
         </div>
       {% endif %}
+    </div>
+
+    <!-- Visual Embeddings & Similar Search Card -->
+    <div class="settings-card" style="margin-top: 1.5rem;" id="embeddings-settings-card"
+      x-data="{
+        isRunning: {{ 'true' if embedding_mgr and embedding_mgr.is_running else 'false' }},
+        percent: {{ embedding_mgr.percent if embedding_mgr else 0 }},
+        statusMsg: '{{ embedding_mgr.progress_message if embedding_mgr else "Ready" }}',
+        embeddedCount: {{ embedding_stats.embedded_images if embedding_stats else 0 }},
+        missingCount: {{ embedding_stats.missing if embedding_stats else 0 }},
+        pollTimer: null,
+        async startGeneration() {
+          this.isRunning = true;
+          this.statusMsg = 'Starting visual embedding indexing...';
+          try {
+            await fetch('/api/embeddings/generate-all', { method: 'POST' });
+            this.startPolling();
+          } catch(e) {
+            this.isRunning = false;
+            this.statusMsg = 'Error: ' + e.message;
+          }
+        },
+        startPolling() {
+          if (this.pollTimer) clearInterval(this.pollTimer);
+          this.pollTimer = setInterval(async () => {
+            try {
+              const res = await fetch('/api/embeddings/status');
+              const data = await res.json();
+              this.isRunning = data.is_running;
+              this.percent = data.percent;
+              this.statusMsg = data.message;
+              if (data.stats) {
+                this.embeddedCount = data.stats.embedded_images;
+                this.missingCount = data.stats.missing;
+              }
+              if (!data.is_running && data.percent >= 100) {
+                clearInterval(this.pollTimer);
+                this.pollTimer = null;
+              }
+            } catch(e) {}
+          }, 1500);
+        }
+      }"
+      x-init="if (isRunning) startPolling();"
+    >
+      <h2 style="font-size: 1.15rem; font-weight: 700; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="8"/>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        Visual Embeddings & Similar Search
+      </h2>
+      <p class="form-help" style="margin-bottom: 1.25rem;">
+        Kimera uses a quantized CLIP ViT-B/32 neural network (~89MB) running on ONNX to compute visual vectors for images and videos. These power automatic tag suggestions and visual similarity discovery in the gallery.
+      </p>
+
+      <div style="background: rgba(15, 23, 42, 0.5); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 1rem; margin-bottom: 1.25rem;">
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem; font-size: 0.875rem;">
+          <span style="color: var(--text-muted);">Indexed Visual Vectors:</span>
+          <span style="font-weight: 700; color: #38bdf8;" x-text="embeddedCount + ' embedded (' + missingCount + ' unindexed)'"></span>
+        </div>
+        
+        <div style="height: 6px; background: rgba(255,255,255,0.06); border-radius: 9999px; overflow: hidden; margin-bottom: 0.5rem;">
+          <div style="height: 100%; background: linear-gradient(90deg, #6366f1, #38bdf8); transition: width 0.3s ease;"
+               :style="'width: ' + ((embeddedCount + missingCount > 0) ? Math.round((embeddedCount / (embeddedCount + missingCount)) * 100) : 0) + '%'">
+          </div>
+        </div>
+
+        <div style="font-size: 0.8125rem; color: var(--text-dim);" x-text="statusMsg"></div>
+      </div>
+
+      <div style="display: flex; gap: 0.75rem; align-items: center;">
+        <button 
+          type="button" 
+          class="btn btn-primary" 
+          @click="startGeneration()" 
+          :disabled="isRunning"
+          style="padding: 0.5rem 1rem; font-size: 0.85rem; display: inline-flex; align-items: center; gap: 0.4rem;"
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3L12 3z"/>
+          </svg>
+          <span x-text="isRunning ? 'Generating Embeddings (' + percent + '%)...' : 'Index Missing Media Embeddings'"></span>
+        </button>
+      </div>
     </div>
   </div>
 </div>

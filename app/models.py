@@ -20,6 +20,7 @@ YUNET_MODEL_URL = "https://github.com/opencv/opencv_zoo/raw/main/models/face_det
 SFACE_MODEL_URL = "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx"
 BUFFALO_L_URL = "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip"
 BUFFALO_S_URL = "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_s.zip"
+CLIP_VISION_MODEL_URL = "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/vision_model_quantized.onnx"
 
 DEFAULT_MODEL_DIR = Path.cwd() / ".cache" / "models"
 
@@ -458,3 +459,142 @@ class FaceEmbedder:
         if norm > 1e-6:
             feature = feature / norm
         return feature
+
+
+def ensure_clip_model(
+    model_dir: Optional[Path] = None,
+    progress_callback: Optional[Callable] = None,
+) -> Path:
+    """Ensure CLIP quantized ONNX vision model is present and return file path."""
+    root_dir = model_dir or (Path.cwd() / ".cache")
+    clip_dir = root_dir / "models" / "clip"
+    dest_path = clip_dir / "vision_model_quantized.onnx"
+    if not dest_path.exists():
+        clip_dir.mkdir(parents=True, exist_ok=True)
+        if progress_callback:
+            try:
+                progress_callback("Downloading CLIP Vision ONNX model (~89MB)...", 0, 0, 100)
+            except Exception:
+                pass
+        download_file(
+            CLIP_VISION_MODEL_URL,
+            dest_path,
+            desc="Downloading CLIP Vision Model",
+            progress_callback=progress_callback,
+        )
+    return dest_path
+
+
+class MediaEmbedder:
+    """
+    Fast CLIP ViT-B/32 ONNX visual embedder for images and videos.
+    Runs directly in ONNX Runtime (CPU/CUDA) in ~15-30ms.
+    Produces normalized 512-dimensional semantic embeddings.
+    """
+
+    def __init__(self, model_path: Optional[Path] = None):
+        if model_path is None:
+            root_dir = Path.cwd() / ".cache"
+            model_path = root_dir / "models" / "clip" / "vision_model_quantized.onnx"
+
+        if not model_path.exists():
+            model_path = ensure_clip_model()
+
+        import onnxruntime as ort
+
+        available_providers = ort.get_available_providers()
+        providers = (
+            ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            if "CUDAExecutionProvider" in available_providers
+            else ["CPUExecutionProvider"]
+        )
+
+        opts = ort.SessionOptions()
+        opts.intra_op_num_threads = max(1, min(4, os.cpu_count() or 2))
+        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+        self.session = ort.InferenceSession(str(model_path), sess_options=opts, providers=providers)
+        self.input_name = self.session.get_inputs()[0].name
+        self.output_name = self.session.get_outputs()[0].name
+
+        self.mean = np.array([0.48145466, 0.4578275, 0.40821073], dtype=np.float32).reshape(1, 1, 3)
+        self.std = np.array([0.26862954, 0.26130258, 0.27577711], dtype=np.float32).reshape(1, 1, 3)
+
+    def preprocess(self, image_rgb: np.ndarray) -> np.ndarray:
+        """Resize to 224x224, scale [0, 1], apply CLIP normalization."""
+        resized = cv2.resize(image_rgb, (224, 224), interpolation=cv2.INTER_AREA)
+        norm = resized.astype(np.float32) / 255.0
+        norm = (norm - self.mean) / self.std
+        chw = np.transpose(norm, (2, 0, 1))
+        return np.expand_dims(chw, axis=0)
+
+    def embed_image(self, image_rgb: np.ndarray) -> np.ndarray:
+        """Compute 512-dim L2-normalized visual embedding for an image."""
+        tensor = self.preprocess(image_rgb)
+        out = self.session.run([self.output_name], {self.input_name: tensor})[0]
+        vec = out[0]
+        norm = np.linalg.norm(vec)
+        if norm > 1e-9:
+            vec = vec / norm
+        return vec.astype(np.float32)
+
+    def embed_video_frames(self, frames_rgb: List[np.ndarray]) -> Optional[np.ndarray]:
+        """Embed multiple video keyframes, average them, and L2-normalize."""
+        if not frames_rgb:
+            return None
+        embs = [self.embed_image(f) for f in frames_rgb if f is not None and f.size > 0]
+        if not embs:
+            return None
+        avg = np.mean(embs, axis=0)
+        norm = np.linalg.norm(avg)
+        if norm > 1e-9:
+            avg = avg / norm
+        return avg.astype(np.float32)
+
+
+_media_embedder_lock = threading.Lock()
+_media_embedder: Optional[MediaEmbedder] = None
+_clip_downloading: bool = False
+
+
+def get_media_embedder(auto_download: bool = False) -> Optional[MediaEmbedder]:
+    """Thread-safe accessor for the MediaEmbedder instance."""
+    global _media_embedder
+    with _media_embedder_lock:
+        if _media_embedder is not None:
+            return _media_embedder
+        clip_path = DEFAULT_MODEL_DIR / "clip" / "vision_model_quantized.onnx"
+        if not clip_path.exists():
+            if not auto_download:
+                return None
+            ensure_clip_model()
+        try:
+            _media_embedder = MediaEmbedder(clip_path)
+            return _media_embedder
+        except Exception as e:
+            print(f"Warning: Failed to load MediaEmbedder: {e}")
+            return None
+
+
+def trigger_clip_download_async(progress_callback: Optional[Callable] = None) -> None:
+    """Start background download of CLIP vision model if not already present."""
+    global _clip_downloading
+    clip_path = DEFAULT_MODEL_DIR / "clip" / "vision_model_quantized.onnx"
+    if clip_path.exists() or _clip_downloading:
+        return
+
+    def _bg():
+        global _clip_downloading
+        _clip_downloading = True
+        try:
+            ensure_clip_model(progress_callback=progress_callback)
+            # Pre-warm embedder once downloaded
+            get_media_embedder(auto_download=False)
+        except Exception as e:
+            print(f"Background CLIP model download notice: {e}")
+        finally:
+            _clip_downloading = False
+
+    t = threading.Thread(target=_bg, daemon=True)
+    t.start()
+

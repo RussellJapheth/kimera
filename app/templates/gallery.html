@@ -3,6 +3,8 @@
 {% block title %}
   {% if cluster_info %}
     {{ cluster_info.name }} - Kimera Gallery
+  {% elif similar_to_image %}
+    Similar to {{ similar_to_image.filename }} - Kimera Gallery
   {% elif active_tag %}
     Tag: {{ active_tag.name }} - Kimera Gallery
   {% elif filter_type == 'favorites' %}
@@ -15,6 +17,30 @@
 {% endblock %}
 
 {% block content %}
+<!-- Similar Media Filter Banner -->
+{% if similar_to_image %}
+  <div style="margin-bottom: 1.5rem; background: linear-gradient(135deg, rgba(30, 41, 59, 0.85), rgba(15, 23, 42, 0.95)); border: 1px solid rgba(99, 102, 241, 0.4); border-radius: var(--radius-lg); padding: 1.25rem 1.5rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.4);">
+    <div style="display: flex; align-items: center; gap: 1rem;">
+      <img src="/api/photos/{{ similar_to_image.id }}/thumbnail" alt="{{ similar_to_image.filename }}" style="width: 54px; height: 54px; border-radius: 8px; object-fit: cover; border: 1px solid rgba(255,255,255,0.15);">
+      <div>
+        <div style="display: flex; align-items: center; gap: 0.5rem;">
+          <span style="font-weight: 700; font-size: 1.05rem; color: #f8fafc;">Visually Similar Media</span>
+          <span style="background: rgba(99, 102, 241, 0.2); color: #a5b4fc; font-size: 0.75rem; font-weight: 600; padding: 0.15rem 0.55rem; border-radius: 9999px;">{{ total }} matches</span>
+        </div>
+        <div style="font-size: 0.8125rem; color: var(--text-muted); margin-top: 0.2rem;">
+          Showing media semantically & visually similar to <strong style="color: #cbd5e1;">{{ similar_to_image.filename }}</strong>
+        </div>
+      </div>
+    </div>
+    <a href="/" class="btn" style="display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.4rem 0.85rem; font-size: 0.8125rem; border-color: rgba(255,255,255,0.2);">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <line x1="18" y1="6" x2="6" y2="18"/>
+        <line x1="6" y1="6" x2="18" y2="18"/>
+      </svg>
+      Clear Filter
+    </a>
+  </div>
+{% endif %}
 <!-- Cluster Rename Banner if browsing a specific cluster -->
 {% if cluster_info %}
   <div style="margin-bottom: 2rem;">
@@ -72,6 +98,8 @@
     <h1 class="page-title">
       {% if cluster_info %}
         Photos of {{ cluster_info.name }}
+      {% elif similar_to_image %}
+        Similar to {{ similar_to_image.filename }}
       {% elif active_tag %}
         #{{ active_tag.name }}
       {% elif filter_type == 'favorites' %}

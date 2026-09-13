@@ -128,6 +128,14 @@ class Database:
                     FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE,
                     FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
                 );
+
+                CREATE TABLE IF NOT EXISTS media_embeddings (
+                    image_id INTEGER PRIMARY KEY,
+                    embedding BLOB NOT NULL,
+                    model TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
+                );
             """)
 
             # 2. Run column migrations for older database schemas
@@ -168,6 +176,7 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_image_tags_image ON image_tags(image_id);
                 CREATE INDEX IF NOT EXISTS idx_image_tags_tag ON image_tags(tag_id);
                 CREATE INDEX IF NOT EXISTS idx_tags_name ON tags(name);
+                CREATE INDEX IF NOT EXISTS idx_media_embeddings_image ON media_embeddings(image_id);
             """)
 
             # 4. Migrate and collapse any legacy video keyframe entries (e.g. "...#t=1.23s") to single clean video files
@@ -502,6 +511,7 @@ class Database:
                 key=lambda f: (0 if f["person_id"] is not None else (1 if f["cluster_id"] >= 0 else 2), -f["confidence"])
             )
             img["faces"] = sorted_faces
+            img["face_count"] = len(sorted_faces)
             img["tags"] = self.get_image_tags(image_id)
             return img
 
@@ -632,9 +642,43 @@ class Database:
         sort_by: str = "date",
         sort_order: str = "desc",
         tag_id: Optional[int] = None,
+        similar_to: Optional[int] = None,
+        threshold: Optional[float] = None,
         exclude_duplicates: bool = False,
     ) -> Dict[str, Optional[int]]:
         """Get previous and next image IDs for modal navigation."""
+        if similar_to is not None:
+            active_threshold = threshold
+            if active_threshold is None:
+                try:
+                    active_threshold = float(self.get_setting("similarity_threshold", 0.60))
+                except (TypeError, ValueError):
+                    active_threshold = 0.60
+
+            # Retrieve ordered list of matching IDs for similar_to query (including main image)
+            similar_data = self.get_similar_images(
+                image_id=similar_to,
+                limit=10000,
+                threshold=active_threshold,
+                page=1,
+                exclude_duplicates=exclude_duplicates,
+            )
+            ids = [img["id"] for img in similar_data.get("images", [])]
+
+            if image_id not in ids:
+                return {"prev_id": None, "next_id": None, "current_index": -1, "total_count": len(ids)}
+
+            idx = ids.index(image_id)
+            prev_id = ids[idx - 1] if idx > 0 else None
+            next_id = ids[idx + 1] if idx < len(ids) - 1 else None
+
+            return {
+                "prev_id": prev_id,
+                "next_id": next_id,
+                "current_index": idx + 1,
+                "total_count": len(ids),
+            }
+
         params: List[Any] = []
         where_clauses: List[str] = []
 
@@ -1601,3 +1645,305 @@ class Database:
                 (int(image_id), int(tag_id)),
             )
             return cursor.rowcount > 0
+
+    def save_media_embedding(self, image_id: int, embedding: np.ndarray, model: str = "clip-vit-b32") -> None:
+        """Save or update whole-media visual embedding."""
+        blob = self.serialize_embedding(embedding)
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO media_embeddings (image_id, embedding, model)
+                VALUES (?, ?, ?)
+                ON CONFLICT(image_id) DO UPDATE SET
+                    embedding = excluded.embedding,
+                    model = excluded.model,
+                    created_at = CURRENT_TIMESTAMP
+            """, (int(image_id), blob, model))
+
+    def get_media_embedding(self, image_id: int) -> Optional[np.ndarray]:
+        """Retrieve whole-media visual embedding for an image."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT embedding FROM media_embeddings WHERE image_id = ?", (int(image_id),))
+            row = cursor.fetchone()
+            if row and row["embedding"]:
+                return self.deserialize_embedding(row["embedding"])
+            return None
+
+    def get_all_media_embeddings(self) -> Dict[int, np.ndarray]:
+        """Retrieve all media embeddings as a dictionary of image_id -> vector."""
+        result: Dict[int, np.ndarray] = {}
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT image_id, embedding FROM media_embeddings")
+            for row in cursor.fetchall():
+                result[row["image_id"]] = self.deserialize_embedding(row["embedding"])
+        return result
+
+    def get_media_embedding_stats(self) -> Dict[str, int]:
+        """Return count of total images vs indexed media embeddings."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) as total FROM images")
+            total = cursor.fetchone()["total"]
+            cursor.execute("SELECT COUNT(*) as embedded FROM media_embeddings")
+            embedded = cursor.fetchone()["embedded"]
+            return {"total_images": total, "embedded_images": embedded, "missing": max(0, total - embedded)}
+
+    def get_unembedded_image_ids(self) -> List[int]:
+        """Retrieve all image IDs that lack a media embedding."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT i.id FROM images i
+                LEFT JOIN media_embeddings me ON me.image_id = i.id
+                WHERE me.image_id IS NULL
+                ORDER BY i.id ASC
+            """)
+            return [r["id"] for r in cursor.fetchall()]
+
+    def get_similar_images(
+        self,
+        image_id: int,
+        limit: int = 48,
+        threshold: float = 0.60,
+        page: int = 1,
+        exclude_duplicates: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Find and return images visually and semantically similar to image_id,
+        sorted by cosine similarity descending.
+        """
+        target_img = self.get_image(image_id)
+        if not target_img:
+            return {
+                "images": [],
+                "total": 0,
+                "page": page,
+                "limit": limit,
+                "total_pages": 0,
+                "target_image": None,
+            }
+
+        target_emb = self.get_media_embedding(image_id)
+        if target_emb is None:
+            t_copy = dict(target_img)
+            t_copy["is_target"] = True
+            t_copy["similarity_score"] = 1.0
+            t_copy["similarity_pct"] = 100
+            t_copy["face_count"] = t_copy.get("face_count", len(t_copy.get("faces", [])))
+            return {
+                "images": [t_copy],
+                "total": 1,
+                "page": page,
+                "limit": limit,
+                "total_pages": 1,
+                "target_image": target_img,
+            }
+
+        all_embs = self.get_all_media_embeddings()
+        all_embs.pop(int(image_id), None)
+        if not all_embs:
+            t_copy = dict(target_img)
+            t_copy["is_target"] = True
+            t_copy["similarity_score"] = 1.0
+            t_copy["similarity_pct"] = 100
+            t_copy["face_count"] = t_copy.get("face_count", len(t_copy.get("faces", [])))
+            return {
+                "images": [t_copy],
+                "total": 1,
+                "page": page,
+                "limit": limit,
+                "total_pages": 1,
+                "target_image": target_img,
+            }
+
+        candidate_ids = list(all_embs.keys())
+        matrix = np.vstack([all_embs[cid] for cid in candidate_ids])
+
+        # Handle CLIP embedding anisotropy (shared bias vector across all media).
+        # When dataset is large enough and a non-trivial mean vector exists (>0.30 norm),
+        # subtract the global mean vector before computing cosine similarity to eliminate
+        # false positive baseline matches (e.g. video multi-frame averaging collapse).
+        if len(matrix) >= 8:
+            mean_vec = np.mean(matrix, axis=0, keepdims=True)
+            if np.linalg.norm(mean_vec) > 0.30:
+                target_centered = target_emb - mean_vec.ravel()
+                target_norm = target_centered / (np.linalg.norm(target_centered) + 1e-9)
+
+                matrix_centered = matrix - mean_vec
+                matrix_norms = np.linalg.norm(matrix_centered, axis=1, keepdims=True) + 1e-9
+                norm_matrix = matrix_centered / matrix_norms
+            else:
+                target_norm = target_emb / (np.linalg.norm(target_emb) + 1e-9)
+                matrix_norms = np.linalg.norm(matrix, axis=1, keepdims=True) + 1e-9
+                norm_matrix = matrix / matrix_norms
+        else:
+            target_norm = target_emb / (np.linalg.norm(target_emb) + 1e-9)
+            matrix_norms = np.linalg.norm(matrix, axis=1, keepdims=True) + 1e-9
+            norm_matrix = matrix / matrix_norms
+
+        # Compute cosine similarity
+        sims = np.dot(norm_matrix, target_norm).ravel()
+
+        # Filter by threshold and sort descending
+        valid_indices = np.where(sims >= threshold)[0]
+        sorted_valid = valid_indices[np.argsort(-sims[valid_indices])]
+
+        # Include main/target image at index 0, followed by similar candidates
+        ranked_matches: List[Tuple[int, float]] = [
+            (int(image_id), 1.0)
+        ] + [
+            (candidate_ids[idx], float(sims[idx])) for idx in sorted_valid
+        ]
+
+        if exclude_duplicates:
+            # Filter out files with identical content_hash (keep earliest, preserving main image)
+            seen_hashes = set()
+            filtered_ranked = []
+            for cid, score in ranked_matches:
+                img_data = target_img if cid == int(image_id) else self.get_image(cid)
+                if img_data:
+                    chash = img_data.get("content_hash")
+                    if chash:
+                        if chash in seen_hashes:
+                            continue
+                        seen_hashes.add(chash)
+                    filtered_ranked.append((cid, score))
+            ranked_matches = filtered_ranked
+
+        total = len(ranked_matches)
+        total_pages = max(1, (total + limit - 1) // limit) if total > 0 else 0
+        offset = max(0, (page - 1) * limit)
+        page_matches = ranked_matches[offset : offset + limit]
+
+        images_list = []
+        for cid, score in page_matches:
+            if cid == int(image_id):
+                img = dict(target_img)
+                img["is_target"] = True
+            else:
+                img = self.get_image(cid)
+                if img:
+                    img["is_target"] = False
+
+            if img:
+                img["similarity_score"] = score
+                img["similarity_pct"] = int(round(score * 100))
+                img["face_count"] = img.get("face_count", len(img.get("faces", [])))
+                images_list.append(img)
+
+        return {
+            "images": images_list,
+            "total": total,
+            "page": page,
+            "limit": limit,
+            "total_pages": total_pages,
+            "target_image": target_img,
+        }
+
+    def suggest_tags_for_image(
+        self,
+        image_id: int,
+        top_k: int = 15,
+        min_score: float = 0.50,
+    ) -> List[Dict[str, Any]]:
+        """
+        Suggest tags for an image using k-NN tag transfer from similar media.
+        Returns ranked list of candidate tags with confidence scores.
+        """
+        target_emb = self.get_media_embedding(image_id)
+        if target_emb is None:
+            return []
+
+        all_embs = self.get_all_media_embeddings()
+        all_embs.pop(int(image_id), None)
+        if not all_embs:
+            return []
+
+        # Get existing tags on this image to exclude them from suggestions
+        existing_tags = {t["id"] for t in self.get_image_tags(image_id)}
+
+        candidate_ids = list(all_embs.keys())
+        matrix = np.vstack([all_embs[cid] for cid in candidate_ids])
+
+        if len(matrix) >= 8:
+            mean_vec = np.mean(matrix, axis=0, keepdims=True)
+            if np.linalg.norm(mean_vec) > 0.30:
+                target_centered = target_emb - mean_vec.ravel()
+                target_norm = target_centered / (np.linalg.norm(target_centered) + 1e-9)
+
+                matrix_centered = matrix - mean_vec
+                matrix_norms = np.linalg.norm(matrix_centered, axis=1, keepdims=True) + 1e-9
+                norm_matrix = matrix_centered / matrix_norms
+            else:
+                target_norm = target_emb / (np.linalg.norm(target_emb) + 1e-9)
+                matrix_norms = np.linalg.norm(matrix, axis=1, keepdims=True) + 1e-9
+                norm_matrix = matrix / matrix_norms
+        else:
+            target_norm = target_emb / (np.linalg.norm(target_emb) + 1e-9)
+            matrix_norms = np.linalg.norm(matrix, axis=1, keepdims=True) + 1e-9
+            norm_matrix = matrix / matrix_norms
+
+        sims = np.dot(norm_matrix, target_norm).ravel()
+
+        # Take top-K most similar items with similarity >= 0.50
+        top_indices = np.argsort(-sims)[:top_k]
+        top_indices = [idx for idx in top_indices if sims[idx] >= 0.50]
+        if not top_indices:
+            return []
+
+        neighbor_ids = [candidate_ids[idx] for idx in top_indices]
+        neighbor_sims = {candidate_ids[idx]: float(sims[idx]) for idx in top_indices}
+
+        # Query tags for these neighbors
+        tag_scores: Dict[int, Dict[str, Any]] = {}
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            placeholders = ",".join("?" for _ in neighbor_ids)
+            cursor.execute(f"""
+                SELECT it.image_id, t.id as tag_id, t.name as tag_name
+                FROM image_tags it
+                JOIN tags t ON t.id = it.tag_id
+                WHERE it.image_id IN ({placeholders})
+            """, neighbor_ids)
+            rows = cursor.fetchall()
+
+        total_sim_weight = sum(neighbor_sims.values()) + 1e-9
+        for row in rows:
+            tid = row["tag_id"]
+            if tid in existing_tags:
+                continue
+            tname = row["tag_name"]
+            sim = neighbor_sims.get(row["image_id"], 0.0)
+
+            if tid not in tag_scores:
+                tag_scores[tid] = {
+                    "id": tid,
+                    "name": tname,
+                    "weighted_sim": 0.0,
+                    "count": 0,
+                    "max_sim": 0.0,
+                }
+            tag_scores[tid]["weighted_sim"] += sim
+            tag_scores[tid]["count"] += 1
+            if sim > tag_scores[tid]["max_sim"]:
+                tag_scores[tid]["max_sim"] = sim
+
+        suggestions = []
+        for tid, data in tag_scores.items():
+            # Normalized score combines frequency in top-K and max similarity
+            freq_score = data["weighted_sim"] / total_sim_weight
+            confidence = 0.6 * data["max_sim"] + 0.4 * min(1.0, freq_score * 2.5)
+            if confidence >= min_score:
+                suggestions.append({
+                    "id": tid,
+                    "name": data["name"],
+                    "score": round(confidence, 2),
+                    "confidence_pct": int(round(confidence * 100)),
+                    "matched_count": data["count"],
+                })
+
+        suggestions.sort(key=lambda x: x["score"], reverse=True)
+        return suggestions
+
