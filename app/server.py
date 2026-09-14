@@ -527,10 +527,11 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         folders_data = db.get_folders(current_folder=path)
         cur_folder = folders_data["current_folder"]
         
-        # Load images directly in current folder (or under it)
+        # Load images directly in current folder
         exclude_duplicates = db.get_setting("exclude_duplicates") == "1"
         images_data = db.get_images(
             folder_path=cur_folder,
+            folder_direct_only=True,
             sort_by=sort_by,
             sort_order=sort_order,
             page=page,
@@ -539,6 +540,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         )
 
         if request.headers.get("HX-Request") and infinite == 1:
+            from urllib.parse import quote_plus
             return templates.TemplateResponse(
                 request=request,
                 name="partials/photo_batch.html",
@@ -549,7 +551,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
                     "folder_path": cur_folder,
                     "sort_by": sort_by,
                     "sort_order": sort_order,
-                    "target_url": f"/folders?path={cur_folder}",
+                    "target_url": f"/folders?path={quote_plus(cur_folder)}",
                 },
             )
 
@@ -1010,6 +1012,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         person_id: Optional[int] = None,
         cluster_id: Optional[int] = None,
         folder_path: Optional[str] = None,
+        folder_direct_only: bool = False,
         similar_to: Optional[int] = None,
         threshold: Optional[float] = None,
         sort_by: str = "date",
@@ -1029,6 +1032,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             person_id=person_id,
             cluster_id=cluster_id,
             folder_path=folder_path,
+            folder_direct_only=folder_direct_only,
             similar_to=similar_to,
             threshold=threshold,
             search=search,
@@ -1088,6 +1092,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         cluster_id: Optional[int] = Query(None),
         folder_path: Optional[str] = Query(None),
         path: Optional[str] = Query(None),
+        direct_only: Optional[int] = Query(None),
         similar_to: Optional[int] = Query(None),
         threshold: Optional[float] = Query(None),
         sort_by: str = Query("date", alias="sort"),
@@ -1095,6 +1100,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         tag_id: Optional[int] = Query(None),
     ):
         effective_folder = folder_path or path
+        is_direct = bool(direct_only == 1 or path or ("/folders" in request.headers.get("referer", "")))
         return _render_photo_modal_response(
             request=request,
             image_id=image_id,
@@ -1103,6 +1109,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             person_id=person_id,
             cluster_id=cluster_id,
             folder_path=effective_folder,
+            folder_direct_only=is_direct if effective_folder else False,
             similar_to=similar_to,
             threshold=threshold,
             sort_by=sort_by,

@@ -528,6 +528,7 @@ class Database:
         person_id: Optional[int] = None,
         cluster_id: Optional[int] = None,
         folder_path: Optional[str] = None,
+        folder_direct_only: bool = False,
         search: Optional[str] = None,
         sort_by: str = "date",  # 'date', 'name', 'faces', 'size'
         sort_order: str = "desc",  # 'desc', 'asc'
@@ -562,8 +563,19 @@ class Database:
 
         if folder_path:
             norm_folder = str(Path(folder_path).resolve())
-            where_clauses.append("(i.file_path LIKE ? OR i.file_path LIKE ?)")
-            params.extend([f"{norm_folder}/%", f"{norm_folder}\\%"])
+            if folder_direct_only:
+                where_clauses.append(
+                    "((i.file_path LIKE ? AND i.file_path NOT LIKE ?) OR (i.file_path LIKE ? AND i.file_path NOT LIKE ?))"
+                )
+                params.extend([
+                    f"{norm_folder}/%",
+                    f"{norm_folder}/%/%",
+                    f"{norm_folder}\\%",
+                    f"{norm_folder}\\%\\%",
+                ])
+            else:
+                where_clauses.append("(i.file_path LIKE ? OR i.file_path LIKE ?)")
+                params.extend([f"{norm_folder}/%", f"{norm_folder}\\%"])
 
         if search:
             search_like = f"%{search.strip()}%"
@@ -645,6 +657,7 @@ class Database:
         person_id: Optional[int] = None,
         cluster_id: Optional[int] = None,
         folder_path: Optional[str] = None,
+        folder_direct_only: bool = False,
         search: Optional[str] = None,
         sort_by: str = "date",
         sort_order: str = "desc",
@@ -707,8 +720,19 @@ class Database:
             params.append(tag_id)
         if folder_path:
             norm_folder = str(Path(folder_path).resolve())
-            where_clauses.append("(i.file_path LIKE ? OR i.file_path LIKE ?)")
-            params.extend([f"{norm_folder}/%", f"{norm_folder}\\%"])
+            if folder_direct_only:
+                where_clauses.append(
+                    "((i.file_path LIKE ? AND i.file_path NOT LIKE ?) OR (i.file_path LIKE ? AND i.file_path NOT LIKE ?))"
+                )
+                params.extend([
+                    f"{norm_folder}/%",
+                    f"{norm_folder}/%/%",
+                    f"{norm_folder}\\%",
+                    f"{norm_folder}\\%\\%",
+                ])
+            else:
+                where_clauses.append("(i.file_path LIKE ? OR i.file_path LIKE ?)")
+                params.extend([f"{norm_folder}/%", f"{norm_folder}\\%"])
         if search:
             search_like = f"%{search.strip()}%"
             where_clauses.append(

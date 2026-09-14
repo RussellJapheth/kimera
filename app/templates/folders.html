@@ -14,7 +14,7 @@
         {{ bc.name }}
       </span>
     {% else %}
-      <a href="/folders?path={{ bc.path }}" style="color: var(--text-muted); text-decoration: none; display: flex; align-items: center; gap: 0.35rem;" class="breadcrumb-link">
+      <a href="/folders?path={{ bc.path | urlencode }}" style="color: var(--text-muted); text-decoration: none; display: flex; align-items: center; gap: 0.35rem;" class="breadcrumb-link">
         {% if loop.first %}
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
@@ -89,19 +89,19 @@
     {% endif %}
     <div class="sort-selector" style="display: flex; align-items: center; gap: 0.35rem; background: var(--surface-card); border: 1px solid var(--border-subtle); padding: 0.25rem 0.6rem; border-radius: var(--radius-full); font-size: 0.8125rem;">
       <span style="color: var(--text-dim);">Sort:</span>
-      <a href="/folders?path={{ folder_info.current_folder }}&sort=date&order={% if sort_by == 'date' and sort_order == 'desc' %}asc{% else %}desc{% endif %}" class="sort-link {% if sort_by == 'date' %}active{% endif %}">
+      <a href="/folders?path={{ folder_info.current_folder | urlencode }}&sort=date&order={% if sort_by == 'date' and sort_order == 'desc' %}asc{% else %}desc{% endif %}" class="sort-link {% if sort_by == 'date' %}active{% endif %}">
         Date {% if sort_by == 'date' %}{{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}
       </a>
       <span style="color: var(--border-subtle);">|</span>
-      <a href="/folders?path={{ folder_info.current_folder }}&sort=name&order={% if sort_by == 'name' and sort_order == 'asc' %}desc{% else %}asc{% endif %}" class="sort-link {% if sort_by == 'name' %}active{% endif %}">
+      <a href="/folders?path={{ folder_info.current_folder | urlencode }}&sort=name&order={% if sort_by == 'name' and sort_order == 'asc' %}desc{% else %}asc{% endif %}" class="sort-link {% if sort_by == 'name' %}active{% endif %}">
         Name {% if sort_by == 'name' %}{{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}
       </a>
       <span style="color: var(--border-subtle);">|</span>
-      <a href="/folders?path={{ folder_info.current_folder }}&sort=size&order={% if sort_by == 'size' and sort_order == 'desc' %}asc{% else %}desc{% endif %}" class="sort-link {% if sort_by == 'size' %}active{% endif %}">
+      <a href="/folders?path={{ folder_info.current_folder | urlencode }}&sort=size&order={% if sort_by == 'size' and sort_order == 'desc' %}asc{% else %}desc{% endif %}" class="sort-link {% if sort_by == 'size' %}active{% endif %}">
         Size {% if sort_by == 'size' %}{{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}
       </a>
       <span style="color: var(--border-subtle);">|</span>
-      <a href="/folders?path={{ folder_info.current_folder }}&sort=faces&order={% if sort_by == 'faces' and sort_order == 'desc' %}asc{% else %}desc{% endif %}" class="sort-link {% if sort_by == 'faces' %}active{% endif %}">
+      <a href="/folders?path={{ folder_info.current_folder | urlencode }}&sort=faces&order={% if sort_by == 'faces' and sort_order == 'desc' %}asc{% else %}desc{% endif %}" class="sort-link {% if sort_by == 'faces' %}active{% endif %}">
         Faces {% if sort_by == 'faces' %}{{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}
       </a>
     </div>
@@ -114,7 +114,7 @@
     <h2 style="font-size: 1.1rem; font-weight: 600; margin-bottom: 1rem; color: var(--text-main);">Subfolders</h2>
     <div class="folder-grid">
       {% for folder in folder_info.subfolders %}
-        <a href="/folders?path={{ folder.full_path }}" class="folder-card">
+        <a href="/folders?path={{ folder.full_path | urlencode }}" class="folder-card">
           <div class="folder-icon-wrapper">
             <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor">
               <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
@@ -143,7 +143,7 @@
         <div 
           id="infinite-scroll-sentinel-2"
           class="infinite-scroll-sentinel"
-          hx-get="/folders?path={{ folder_info.current_folder }}&page=2&infinite=1&sort={{ sort_by }}&order={{ sort_order }}"
+          hx-get="/folders?path={{ folder_info.current_folder | urlencode }}&page=2&infinite=1&sort={{ sort_by }}&order={{ sort_order }}"
           hx-trigger="revealed"
           hx-swap="outerHTML"
         >
