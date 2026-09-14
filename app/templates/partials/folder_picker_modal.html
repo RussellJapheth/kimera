@@ -4,7 +4,7 @@
   folderSearch: '',
   isCreatingNew: false,
   isProcessing: false,
-  folders: {{ folders|tojson }},
+  folders: {{ folders|tojson|forceescape }},
   get filteredFolders() {
     if (!this.folderSearch.trim()) return this.folders;
     const term = this.folderSearch.toLowerCase().trim();
