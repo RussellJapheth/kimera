@@ -1,14 +1,104 @@
 <div class="target-picker-card" style="max-width: 580px; width: 95%; max-height: 85vh; display: flex; flex-direction: column;" @click.stop x-data="{
-  selectedFolder: '{{ folders[0] if folders else '' }}',
+  selectedFolder: '',
   customFolder: '',
   folderSearch: '',
   isCreatingNew: false,
   isProcessing: false,
   folders: {{ folders|tojson|forceescape }},
+  sourceRoot: {{ source_root|tojson|forceescape }},
+  navSegs: [],
+  init() {
+    this.navSegs = this.rootSegs.length ? this.rootSegs : this.commonSegs(this.folders);
+    const firstChild = this.dirChildren[0];
+    if (firstChild) this.selectedFolder = firstChild.path;
+  },
+  get rootSegs() {
+    return this.sourceRoot ? this.segsOf(this.sourceRoot) : [];
+  },
+  segsOf(folder) {
+    return folder.split('/').filter(Boolean);
+  },
+  commonSegs(folders) {
+    if (!folders.length) return [];
+    const segs = folders.map(f => this.segsOf(f));
+    const common = [];
+    for (let i = 0; i < segs[0].length; i++) {
+      if (segs.every(s => s[i] === segs[0][i])) common.push(segs[0][i]);
+      else break;
+    }
+    return common;
+  },
+  joinedPath(segs) {
+    return segs.join('/');
+  },
+  get currentPath() {
+    if (!this.navSegs.length) return '';
+    const match = this.folders.find(f => {
+      const s = this.segsOf(f);
+      return s.length === this.navSegs.length && this.navSegs.every((x, i) => x === s[i]);
+    });
+    return match || this.joinedPath(this.navSegs);
+  },
+  get breadcrumbs() {
+    if (!this.sourceRoot) {
+      const out = [{ label: 'Root', segs: [] }];
+      for (let i = 0; i < this.navSegs.length; i++) {
+        out.push({ label: this.navSegs[i], segs: this.navSegs.slice(0, i + 1) });
+      }
+      return out;
+    }
+    const rootSegs = this.rootSegs;
+    const rootLabel = this.segsOf(this.sourceRoot).pop() || 'Root';
+    const out = [];
+    for (let i = rootSegs.length; i <= this.navSegs.length; i++) {
+      const segs = this.navSegs.slice(0, i);
+      const isRoot = i === rootSegs.length;
+      out.push({
+        label: isRoot ? rootLabel : this.navSegs[i - 1],
+        segs: segs,
+        isRoot: isRoot,
+        title: isRoot ? this.sourceRoot : this.joinedPath(segs)
+      });
+    }
+    return out;
+  },
+  get dirChildren() {
+    const grouped = new Map();
+    for (const f of this.folders) {
+      const segs = this.segsOf(f);
+      if (segs.length <= this.navSegs.length) continue;
+      if (this.navSegs.some((s, i) => s !== segs[i])) continue;
+      const childSegs = segs.slice(0, this.navSegs.length + 1);
+      const key = childSegs.join('/');
+      let node = grouped.get(key);
+      if (!node) {
+        node = { name: childSegs[childSegs.length - 1], path: f, hasChildren: false };
+        grouped.set(key, node);
+      }
+      if (segs.length > childSegs.length) node.hasChildren = true;
+    }
+    return [...grouped.values()].sort((a, b) => a.path.localeCompare(b.path));
+  },
   get filteredFolders() {
     if (!this.folderSearch.trim()) return this.folders;
     const term = this.folderSearch.toLowerCase().trim();
     return this.folders.filter(f => f.toLowerCase().includes(term));
+  },
+  searchEntries(folder) {
+    return {
+      name: this.segsOf(folder).pop() || folder,
+      path: folder,
+      hasChildren: this.folders.some(f => f.startsWith(folder + '/'))
+    };
+  },
+  openFolder(folder) {
+    this.navSegs = this.segsOf(folder);
+    this.folderSearch = '';
+  },
+  pickFolder(folder) {
+    this.selectedFolder = folder;
+    this.isCreatingNew = false;
+    this.folderSearch = '';
   },
   get targetFolder() {
     return this.isCreatingNew && this.customFolder.trim() ? this.customFolder.trim() : this.selectedFolder;
@@ -97,6 +187,23 @@
     </button>
   </div>
 
+  <!-- Breadcrumb navigation -->
+  <div style="padding: 0.55rem 1.5rem 0; display: flex; align-items: center; gap: 0.25rem; flex-wrap: wrap;" x-show="!folderSearch.trim()">
+    <template x-for="(c, i) in breadcrumbs" :key="i">
+      <span style="display: inline-flex; align-items: center; gap: 0.25rem;">
+        <button 
+          type="button" 
+          @click="navSegs = c.segs" 
+          :style="i === breadcrumbs.length - 1 ? 'font-weight: 700; color: #a5b4fc; background: rgba(99, 102, 241, 0.12); border-color: rgba(99, 102, 241, 0.3);' : 'color: var(--text-muted);'"
+          :title="c.title"
+          style="background: none; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 0.15rem 0.55rem; font-size: 0.75rem; cursor: pointer;"
+          x-text="c.label"
+        ></button>
+        <span x-show="i < breadcrumbs.length - 1" style="color: var(--text-dim); font-size: 0.75rem;">/</span>
+      </span>
+    </template>
+  </div>
+
   <!-- New Custom Folder Input -->
   <div x-show="isCreatingNew" style="padding: 0.75rem 1.5rem; background: rgba(99, 102, 241, 0.08); border-bottom: 1px solid rgba(99, 102, 241, 0.2);">
     <label style="display: block; font-size: 0.75rem; font-weight: 600; color: #a5b4fc; margin-bottom: 0.35rem;">
@@ -112,26 +219,99 @@
   </div>
 
   <!-- Folder List -->
-  <div style="flex: 1; overflow-y: auto; padding: 0.75rem 1.5rem; max-height: 320px; display: flex; flex-direction: column; gap: 0.4rem;">
+  <div style="flex: 1; overflow-y: auto; padding: 0.75rem 1.5rem; max-height: 320px; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0.5rem; align-content: start;">
+
+    <!-- Use current browsed folder -->
+    <div 
+      x-show="!folderSearch.trim() && navSegs.length && currentPath"
+      @click="pickFolder(currentPath)"
+      :class="{ 'selected-folder-item': selectedFolder === currentPath && !isCreatingNew }"
+      class="folder-select-row"
+      style="grid-column: 1 / -1; padding: 0.65rem 0.85rem; border-radius: var(--radius-md); border: 1px dashed rgba(99, 102, 241, 0.45); cursor: pointer; display: flex; align-items: center; justify-content: space-between; transition: var(--transition);"
+    >
+      <div style="display: flex; align-items: center; gap: 0.6rem; min-width: 0;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" style="color: #a5b4fc; flex-shrink: 0;">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+        </svg>
+        <div style="min-width: 0;">
+          <span style="font-size: 0.75rem; color: var(--text-muted); display: block;">Use current folder</span>
+          <span style="font-size: 0.875rem; color: #a5b4fc; font-weight: 600; word-break: break-all; display: block;" x-text="currentPath"></span>
+        </div>
+      </div>
+      <span style="font-size: 0.75rem; color: #10b981; font-weight: 700; flex-shrink: 0;" x-text="selectedFolder === currentPath && !isCreatingNew ? '✓ selected' : 'select'"></span>
+    </div>
+
+    <!-- Browsed directories -->
+    <template x-for="folder in dirChildren" :key="folder.path">
+      <div 
+        x-show="!folderSearch.trim()"
+        @click="pickFolder(folder.path)"
+        :class="{ 'selected-folder-item': selectedFolder === folder.path && !isCreatingNew }"
+        class="folder-select-row"
+        style="min-width: 0; padding: 0.65rem 0.85rem; border-radius: var(--radius-md); border: 1px solid var(--border-subtle); cursor: pointer; display: flex; align-items: center; gap: 0.6rem; transition: var(--transition);"
+      >
+        <div style="display: flex; align-items: center; gap: 0.6rem; min-width: 0; flex: 1;">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" style="color: #6366f1; flex-shrink: 0;">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+          </svg>
+          <span style="font-size: 0.875rem; color: var(--text-main); font-weight: 500; word-break: break-all;" x-text="folder.name"></span>
+        </div>
+        <span x-show="selectedFolder === folder.path && !isCreatingNew" style="color: #10b981; font-size: 0.875rem; font-weight: 700; flex-shrink: 0;">
+          ✓
+        </span>
+        <button 
+          type="button"
+          x-show="folder.hasChildren"
+          @click.stop="openFolder(folder.path)"
+          title="View subdirectories"
+          style="flex-shrink: 0; background: rgba(99, 102, 241, 0.12); border: 1px solid rgba(99, 102, 241, 0.3); color: #a5b4fc; border-radius: var(--radius-sm); padding: 0.25rem 0.5rem; font-size: 0.75rem; cursor: pointer; display: inline-flex; align-items: center; gap: 0.25rem;"
+        >
+          Open
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <path d="m9 18 6-6-6-6"/>
+          </svg>
+        </button>
+      </div>
+    </template>
+
+    <!-- Search results -->
     <template x-for="folder in filteredFolders" :key="folder">
       <div 
-        @click="selectedFolder = folder; isCreatingNew = false;"
+        x-show="folderSearch.trim()"
+        @click="pickFolder(folder)"
         :class="{ 'selected-folder-item': selectedFolder === folder && !isCreatingNew }"
         class="folder-select-row"
-        style="padding: 0.65rem 0.85rem; border-radius: var(--radius-md); border: 1px solid var(--border-subtle); cursor: pointer; display: flex; align-items: center; justify-content: space-between; transition: var(--transition);"
+        style="min-width: 0; padding: 0.65rem 0.85rem; border-radius: var(--radius-md); border: 1px solid var(--border-subtle); cursor: pointer; display: flex; align-items: center; gap: 0.6rem; transition: var(--transition);"
       >
-        <div style="display: flex; align-items: center; gap: 0.6rem; min-width: 0;">
+        <div style="display: flex; align-items: center; gap: 0.6rem; min-width: 0; flex: 1;">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" style="color: #6366f1; flex-shrink: 0;">
             <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
           </svg>
           <span style="font-size: 0.875rem; color: var(--text-main); font-weight: 500; word-break: break-all;" x-text="folder"></span>
         </div>
-        <div x-show="selectedFolder === folder && !isCreatingNew" style="color: #10b981; font-size: 0.875rem; font-weight: 700;">
+        <span x-show="selectedFolder === folder && !isCreatingNew" style="color: #10b981; font-size: 0.875rem; font-weight: 700; flex-shrink: 0;">
           ✓
-        </div>
+        </span>
+        <button 
+          type="button"
+          x-show="searchEntries(folder).hasChildren"
+          @click.stop="openFolder(folder)"
+          title="View subdirectories"
+          style="flex-shrink: 0; background: rgba(99, 102, 241, 0.12); border: 1px solid rgba(99, 102, 241, 0.3); color: #a5b4fc; border-radius: var(--radius-sm); padding: 0.25rem 0.5rem; font-size: 0.75rem; cursor: pointer; display: inline-flex; align-items: center; gap: 0.25rem;"
+        >
+          Open
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <path d="m9 18 6-6-6-6"/>
+          </svg>
+        </button>
       </div>
     </template>
-    <div x-show="filteredFolders.length === 0" style="padding: 1.5rem; text-align: center; color: var(--text-muted); font-size: 0.875rem;">
+
+    <div x-show="!folderSearch.trim() && dirChildren.length === 0" style="grid-column: 1 / -1; padding: 1.5rem; text-align: center; color: var(--text-muted); font-size: 0.875rem;">
+      <div x-show="currentPath">No subfolders here. Select this folder or use "+ New Folder".</div>
+      <div x-show="!currentPath">No folders available. Use "+ New Folder" to specify a path.</div>
+    </div>
+    <div x-show="folderSearch.trim() && filteredFolders.length === 0" style="grid-column: 1 / -1; padding: 1.5rem; text-align: center; color: var(--text-muted); font-size: 0.875rem;">
       No matching folders. Use "+ New Folder" to specify a path.
     </div>
   </div>

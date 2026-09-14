@@ -371,6 +371,21 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
     embedding_mgr = EmbeddingManager(db_path)
     thumbnail_mgr = ThumbnailManager(db_path, cache_dir=resolved_cache_dir)
 
+    def _media_source_root() -> Optional[Path]:
+        input_dir = db.get_setting("input_dir")
+        if input_dir and Path(input_dir).exists():
+            return Path(input_dir).resolve()
+        return None
+
+    def _within_source_root(path: Path) -> bool:
+        root = _media_source_root()
+        if root is None:
+            return True
+        try:
+            return path.resolve().is_relative_to(root)
+        except ValueError:
+            return False
+
     # On server start/restart: trigger background download of CLIP vision model if missing
     from app.models import trigger_clip_download_async
     trigger_clip_download_async()
@@ -1841,6 +1856,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             raise HTTPException(status_code=400, detail="destination_folder is required")
 
         dest_dir = Path(destination_folder).resolve()
+        if not _within_source_root(dest_dir):
+            raise HTTPException(status_code=400, detail="Destination must be within the media source directory")
         dest_dir.mkdir(parents=True, exist_ok=True)
 
         moved_count = 0
@@ -1892,6 +1909,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
 
             if destination_folder:
                 dest_dir = Path(destination_folder).resolve()
+                if not _within_source_root(dest_dir):
+                    raise HTTPException(status_code=400, detail="Destination must be within the media source directory")
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 candidate_name = src_path.name
             else:
@@ -1977,6 +1996,9 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         current_folder: Optional[str] = Query(None),
     ):
         folders = db.get_all_folder_paths()
+        source_root = _media_source_root()
+        if source_root is not None:
+            folders = [f for f in folders if Path(f).is_relative_to(source_root)]
         return templates.TemplateResponse(
             request=request,
             name="partials/folder_picker_modal.html",
@@ -1984,6 +2006,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
                 "action": action,
                 "image_ids": image_ids,
                 "folders": folders,
+                "source_root": str(source_root) if source_root else None,
                 "current_folder": current_folder,
             },
         )
