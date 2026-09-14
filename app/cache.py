@@ -7,10 +7,11 @@ Uses 2-tier directory sharding to support massive libraries without filesystem p
 from __future__ import annotations
 
 import hashlib
+import io
 from pathlib import Path
 import shutil
 import subprocess
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 from PIL import Image, ImageOps
@@ -126,6 +127,64 @@ class ThumbnailCache:
             part_path.unlink(missing_ok=True)
             return None
 
+    def _extract_video_frame(self, src: Path) -> Optional[np.ndarray]:
+        """Extract a representative RGB frame via OpenCV, falling back to ffmpeg for codecs OpenCV cannot decode (e.g. AV1)."""
+        try:
+            cap = cv2.VideoCapture(str(src))
+            if cap.isOpened():
+                fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
+                cap.set(cv2.CAP_PROP_POS_FRAMES, int(fps * 0.5))
+                ret, frame_bgr = cap.read()
+                if not ret or frame_bgr is None:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    ret, frame_bgr = cap.read()
+                cap.release()
+                if ret and frame_bgr is not None:
+                    return cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        except Exception:
+            pass
+
+        ffmpeg_bin = shutil.which("ffmpeg")
+        if not ffmpeg_bin:
+            return None
+        try:
+            proc = subprocess.run(
+                [
+                    ffmpeg_bin, "-y", "-ss", "0.5", "-i", str(src.resolve()),
+                    "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            if proc.returncode != 0 or not proc.stdout:
+                return None
+            with Image.open(io.BytesIO(proc.stdout)) as img:
+                img = ImageOps.exif_transpose(img)
+                if img.mode not in ("RGB", "RGBA"):
+                    img = img.convert("RGB")
+                return np.array(img)
+        except Exception:
+            return None
+
+    def _thumbnail_locations(self, src: Path, max_dim: int) -> Tuple[Path, Path, Path]:
+        """Return (shard_folder, sharded_thumb_path, legacy_thumb_path) for a media file."""
+        file_hash = self._path_hash(str(src.resolve()))
+        shard_folder = self._shard_dir(self.thumbs_dir, file_hash)
+        return shard_folder, shard_folder / f"{file_hash}_{max_dim}.webp", self.thumbs_dir / f"{file_hash}_{max_dim}.webp"
+
+    def has_thumbnail(self, media_path: str | Path, max_dim: int = 480) -> bool:
+        """Return True if a cached WebP thumbnail exists for the media file."""
+        src = Path(media_path)
+        if not src.is_file():
+            return False
+        _, thumb_path, legacy_path = self._thumbnail_locations(src, max_dim)
+        return thumb_path.is_file() or legacy_path.is_file()
+
+    def count_missing_thumbnails(self, media_paths: List[Path | str], max_dim: int = 480) -> int:
+        """Count media files that exist on disk but lack a cached thumbnail."""
+        return sum(1 for p in media_paths if Path(p).is_file() and not self.has_thumbnail(p, max_dim))
+
     def get_thumbnail(self, media_path: str | Path, max_dim: int = 480) -> Optional[Path]:
         """
         Generate or retrieve a cached WebP thumbnail for an image or video file.
@@ -135,34 +194,20 @@ class ThumbnailCache:
         if not src.is_file():
             return None
 
-        file_hash = self._path_hash(str(src.resolve()))
-        shard_folder = self._shard_dir(self.thumbs_dir, file_hash)
-        thumb_path = shard_folder / f"{file_hash}_{max_dim}.webp"
-        legacy_path = self.thumbs_dir / f"{file_hash}_{max_dim}.webp"
+        shard_folder, thumb_path, legacy_path = self._thumbnail_locations(src, max_dim)
 
-        if thumb_path.exists():
+        if thumb_path.is_file():
             return thumb_path
-        if legacy_path.exists():
+        if legacy_path.is_file():
             return legacy_path
 
-        # If video file: extract representative frame with OpenCV
+        # If video file: extract representative frame with OpenCV, fall back to ffmpeg (e.g. AV1)
         if self.is_video(src):
             try:
-                cap = cv2.VideoCapture(str(src))
-                if not cap.isOpened():
-                    return None
-                fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
-                cap.set(cv2.CAP_PROP_POS_FRAMES, int(fps * 0.5))
-                ret, frame_bgr = cap.read()
-                if not ret or frame_bgr is None:
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    ret, frame_bgr = cap.read()
-                cap.release()
-
-                if not ret or frame_bgr is None:
+                frame_rgb = self._extract_video_frame(src)
+                if frame_rgb is None:
                     return None
 
-                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
                 img = Image.fromarray(frame_rgb)
                 img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
                 shard_folder.mkdir(parents=True, exist_ok=True)
@@ -299,12 +344,9 @@ class ThumbnailCache:
 
         if self.is_video(src):
             try:
-                cap = cv2.VideoCapture(str(src))
-                ret, frame_bgr = cap.read()
-                cap.release()
-                if not ret or frame_bgr is None:
+                frame_rgb = self._extract_video_frame(src)
+                if frame_rgb is None:
                     return None
-                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
                 return self.save_face_crop_from_array(face_id, frame_rgb, bbox, size=size, margin=margin)
             except Exception:
                 return None

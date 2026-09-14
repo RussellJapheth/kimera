@@ -183,6 +183,115 @@ class EmbeddingManager:
                 self.progress_message = f"Embedding indexing error: {e}"
 
 
+class ThumbnailManager:
+    """Regenerates cached thumbnails for indexed media that are missing one. Only missing files are processed."""
+
+    def __init__(self, db_path: str = "face_clusters.db", cache_dir: Optional[str] = None):
+        self.db_path = db_path
+        self.cache_dir = cache_dir
+        self.is_running = False
+        self.status = "idle"  # idle, running, completed, error
+        self.progress_message = "Ready"
+        self.percent = 0
+        self.current_count = 0
+        self.total_count = 0
+        self.error: Optional[str] = None
+        self.stats: Dict[str, Any] = {}
+        self._lock = threading.Lock()
+
+    def start_generation(self) -> bool:
+        with self._lock:
+            if self.is_running:
+                return False
+            self.is_running = True
+            self.status = "running"
+            self.progress_message = "Scanning library for missing thumbnails..."
+            self.percent = 0
+            self.current_count = 0
+            self.total_count = 0
+            self.error = None
+            self.stats = {}
+
+        thread = threading.Thread(target=self._run_thread, daemon=True)
+        thread.start()
+        return True
+
+    def _on_progress(self, msg: str, percent: int = 0, current: int = 0, total: int = 0) -> None:
+        with self._lock:
+            self.progress_message = msg
+            self.percent = max(0, min(100, percent))
+            self.current_count = current
+            self.total_count = total
+
+    def _run_thread(self) -> None:
+        try:
+            db = Database(self.db_path)
+            cache = ThumbnailCache(self.cache_dir)
+            all_paths = db.get_all_media_paths()
+            total = len(all_paths)
+            self._on_progress("Checking cached thumbnails...", 0, 0, total)
+
+            missing = []
+            for i, p in enumerate(all_paths):
+                if Path(p).is_file() and not cache.has_thumbnail(p, 480):
+                    missing.append(p)
+                if (i + 1) % 100 == 0 or i + 1 == total:
+                    self._on_progress(
+                        f"Checked {i + 1}/{total} media files for missing thumbnails...",
+                        int((i + 1) / max(1, total) * 100), i + 1, total,
+                    )
+
+            missing_total = len(missing)
+            if missing_total == 0:
+                with self._lock:
+                    self.is_running = False
+                    self.status = "completed"
+                    self.percent = 100
+                    self.stats = {"checked": total, "missing": 0, "generated": 0, "failed": 0}
+                    self.progress_message = "No missing thumbnails found. All cached media already has one."
+                return
+
+            self._on_progress(f"Found {missing_total} missing thumbnails. Generating...", 0, 0, missing_total)
+
+            generated = 0
+            failed = 0
+            for i, p in enumerate(missing):
+                if not Path(p).is_file():
+                    failed += 1
+                elif cache.has_thumbnail(p, 480):
+                    pass  # cached by another request meanwhile
+                elif cache.get_thumbnail(p, 480) is not None:
+                    generated += 1
+                else:
+                    failed += 1
+                if (i + 1) % 10 == 0 or i + 1 == missing_total:
+                    self._on_progress(
+                        f"Generated {generated} of {missing_total} missing thumbnails...",
+                        int((i + 1) / max(1, missing_total) * 100), i + 1, missing_total,
+                    )
+
+            with self._lock:
+                self.is_running = False
+                self.status = "completed"
+                self.percent = 100
+                self.stats = {
+                    "checked": total,
+                    "missing": missing_total,
+                    "generated": generated,
+                    "failed": failed,
+                }
+                self.progress_message = (
+                    f"Thumbnail regeneration complete: {generated} generated, "
+                    f"{failed} failed, {missing_total - generated - failed} already cached."
+                )
+        except Exception as e:
+            with self._lock:
+                self.is_running = False
+                self.status = "error"
+                self.error = str(e)
+                self.progress_message = f"Thumbnail regeneration error: {e}"
+
+
 class DeleteFilesRequest(BaseModel):
     image_ids: List[int]
 
@@ -260,6 +369,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     scan_mgr = ScanManager(db_path, cache_dir=resolved_cache_dir)
     embedding_mgr = EmbeddingManager(db_path)
+    thumbnail_mgr = ThumbnailManager(db_path, cache_dir=resolved_cache_dir)
 
     # On server start/restart: trigger background download of CLIP vision model if missing
     from app.models import trigger_clip_download_async
@@ -524,6 +634,10 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         default_dir = saved_settings.get("input_dir") or (str(Path("pictures").resolve()) if Path("pictures").exists() else str(Path.cwd()))
         cache_stats = cache.get_cache_stats()
         embedding_stats = db.get_media_embedding_stats()
+        try:
+            missing_thumb_count = cache.count_missing_thumbnails(db.get_all_media_paths(), max_dim=480)
+        except Exception:
+            missing_thumb_count = 0
         return templates.TemplateResponse(
             request=request,
             name="settings.html",
@@ -533,6 +647,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
                 "settings": saved_settings,
                 "cache_dir": str(cache.cache_dir),
                 "cache_stats": cache_stats,
+                "missing_thumb_count": missing_thumb_count,
                 "scan_mgr": scan_mgr,
                 "embedding_mgr": embedding_mgr,
                 "embedding_stats": embedding_stats,
@@ -558,6 +673,27 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             "total": embedding_mgr.total_count,
             "message": embedding_mgr.progress_message,
             "error": embedding_mgr.error,
+            "stats": stats,
+        }
+
+    @app.post("/api/thumbnails/generate-missing")
+    async def generate_missing_thumbnails():
+        if thumbnail_mgr.is_running:
+            return {"status": "already_running", "message": thumbnail_mgr.progress_message}
+        started = thumbnail_mgr.start_generation()
+        return {"status": "started" if started else "failed"}
+
+    @app.get("/api/thumbnails/status")
+    async def get_thumbnails_status():
+        stats = thumbnail_mgr.stats if thumbnail_mgr.status in ("completed", "error") else None
+        return {
+            "is_running": thumbnail_mgr.is_running,
+            "status": thumbnail_mgr.status,
+            "percent": thumbnail_mgr.percent,
+            "current": thumbnail_mgr.current_count,
+            "total": thumbnail_mgr.total_count,
+            "message": thumbnail_mgr.progress_message,
+            "error": thumbnail_mgr.error,
             "stats": stats,
         }
 
@@ -794,6 +930,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
 
         thumb = cache.get_thumbnail(img_meta["file_path"], max_dim=480)
         if not thumb or not thumb.exists():
+            if cache.is_video(img_meta["file_path"]):
+                raise HTTPException(status_code=404, detail="Thumbnail unavailable")
             return FileResponse(img_meta["file_path"])
 
         return FileResponse(

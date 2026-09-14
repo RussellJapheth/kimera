@@ -266,6 +266,13 @@ class Database:
                 return None
             return dict(row)
 
+    def get_all_media_paths(self) -> List[str]:
+        """Return file paths of all indexed media."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT file_path FROM images")
+            return [r["file_path"] for r in cursor.fetchall()]
+
     def get_all_images_file_meta_map(self) -> Dict[str, Dict[str, Any]]:
         """Retrieve a dictionary mapping file_path -> file_meta for all indexed files."""
         with self._get_connection() as conn:
