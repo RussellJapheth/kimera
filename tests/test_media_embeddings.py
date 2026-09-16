@@ -1,11 +1,16 @@
-import numpy as np
-import pytest
-from fastapi.testclient import TestClient
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Russell Japheth
+#
+# This file is part of Kimera. See the LICENSE file for details.
+
 from pathlib import Path
 
+import numpy as np
+import pytest
 from app.db import Database
+from app.models import get_media_embedder
 from app.server import create_app
-from app.models import MediaEmbedder, get_media_embedder
+from fastapi.testclient import TestClient
 
 
 def test_media_embeddings_db_crud(tmp_path: Path):
@@ -239,10 +244,12 @@ def test_stricter_similarity_threshold(tmp_path: Path):
     assert "Main" in resp.text
 
     # Setting save endpoint supports similarity_threshold
-    resp = client.post("/api/settings/save", data={
-        "input_dir": str(tmp_path),
-        "similarity_threshold": "0.85",
-    })
+    resp = client.post(
+        "/api/settings/save",
+        data={
+            "input_dir": str(tmp_path),
+            "similarity_threshold": "0.85",
+        },
+    )
     assert resp.status_code == 200
     assert db.get_setting("similarity_threshold") == "0.85"
-

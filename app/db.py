@@ -1,14 +1,26 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Russell Japheth
+#
+# This file is part of Kimera. See the LICENSE file for details.
+
 """
 SQLite database layer for storing images, face detections, embeddings, clusters, and named people.
+
+All SQL values are passed as bound parameters. The `S608` warnings below are for
+queries that interpolate only fixed column lists, `ASC`/`DESC`, or `?` placeholder
+runs generated from the length of a validated id list -- never user-supplied values.
 """
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any
+
 import numpy as np
 
+logger = logging.getLogger(__name__)
 
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".m4v"}
 
@@ -39,7 +51,7 @@ def format_duration(duration_sec: float | int | None) -> str:
     """Format seconds into HH:MM:SS or MM:SS."""
     if not duration_sec or duration_sec <= 0:
         return ""
-    total_sec = int(round(float(duration_sec)))
+    total_sec = round(float(duration_sec))
     hours = total_sec // 3600
     mins = (total_sec % 3600) // 60
     secs = total_sec % 60
@@ -195,7 +207,7 @@ class Database:
                     else:
                         cursor.execute(
                             "INSERT INTO images (file_path, width, height, is_favorite) VALUES (?, ?, ?, ?)",
-                            (clean_path, row["width"] or 0, row["height"] or 0, row["is_favorite"] or 0)
+                            (clean_path, row["width"] or 0, row["height"] or 0, row["is_favorite"] or 0),
                         )
                         clean_id = cursor.lastrowid
 
@@ -230,12 +242,12 @@ class Database:
                 INSERT OR IGNORE INTO images (file_path, width, height, file_size, mtime, content_hash, duration)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (file_path, int(width), int(height), int(file_size), float(mtime), content_hash, float(duration))
+                (file_path, int(width), int(height), int(file_size), float(mtime), content_hash, float(duration)),
             )
             if (width > 0 and height > 0) or file_size > 0 or duration > 0.0:
                 cursor.execute(
                     """
-                    UPDATE images 
+                    UPDATE images
                     SET width = COALESCE(NULLIF(?, 0), width),
                         height = COALESCE(NULLIF(?, 0), height),
                         file_size = COALESCE(NULLIF(?, 0), file_size),
@@ -244,36 +256,34 @@ class Database:
                         duration = COALESCE(NULLIF(?, 0.0), duration)
                     WHERE file_path = ?
                     """,
-                    (int(width), int(height), int(file_size), float(mtime), content_hash, float(duration), file_path)
+                    (int(width), int(height), int(file_size), float(mtime), content_hash, float(duration), file_path),
                 )
-            cursor.execute(
-                "SELECT id FROM images WHERE file_path = ?",
-                (file_path,)
-            )
+            cursor.execute("SELECT id FROM images WHERE file_path = ?", (file_path,))
             row = cursor.fetchone()
             return int(row["id"])
 
-    def get_image_file_meta(self, file_path: str) -> Optional[Dict[str, Any]]:
+    def get_image_file_meta(self, file_path: str) -> dict[str, Any] | None:
         """Retrieve fast stat/hash metadata for an indexed file."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT id, file_path, file_size, mtime, content_hash, width, height, duration FROM images WHERE file_path = ?",
-                (file_path,)
+                "SELECT id, file_path, file_size, mtime, content_hash, width, height, duration "
+                "FROM images WHERE file_path = ?",
+                (file_path,),
             )
             row = cursor.fetchone()
             if not row:
                 return None
             return dict(row)
 
-    def get_all_media_paths(self) -> List[str]:
+    def get_all_media_paths(self) -> list[str]:
         """Return file paths of all indexed media."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT file_path FROM images")
             return [r["file_path"] for r in cursor.fetchall()]
 
-    def get_all_images_file_meta_map(self) -> Dict[str, Dict[str, Any]]:
+    def get_all_images_file_meta_map(self) -> dict[str, dict[str, Any]]:
         """Retrieve a dictionary mapping file_path -> file_meta for all indexed files."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -281,16 +291,14 @@ class Database:
             rows = cursor.fetchall()
             return {str(row["file_path"]): dict(row) for row in rows}
 
-    def get_hash_records(self) -> List[Dict[str, Any]]:
+    def get_hash_records(self) -> list[dict[str, Any]]:
         """Return id, file_path, file_size, mtime, content_hash for every indexed file."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                "SELECT id, file_path, file_size, mtime, content_hash FROM images ORDER BY id ASC"
-            )
+            cursor.execute("SELECT id, file_path, file_size, mtime, content_hash FROM images ORDER BY id ASC")
             return [dict(r) for r in cursor.fetchall()]
 
-    def get_duplicate_groups(self) -> Dict[str, Any]:
+    def get_duplicate_groups(self) -> dict[str, Any]:
         """
         Group indexed media by content fingerprint and return only groups with 2+ files.
         The first indexed file (lowest id) is designated as the "keep" record.
@@ -302,7 +310,7 @@ class Database:
             )
             rows = cursor.fetchall()
 
-        by_hash: Dict[str, List[Dict[str, Any]]] = {}
+        by_hash: dict[str, list[dict[str, Any]]] = {}
         for r in rows:
             rec = dict(r)
             by_hash.setdefault(rec["content_hash"], []).append(rec)
@@ -316,15 +324,14 @@ class Database:
             keep = g[0]
             dups = g[1:]
             total_duplicates += len(dups)
-            groups.append({
-                "content_hash": keep["content_hash"],
-                "size": len(g),
-                "keep": {**keep, "filename": Path(keep["file_path"]).name},
-                "duplicates": [
-                    {**d, "filename": Path(d["file_path"]).name}
-                    for d in dups
-                ],
-            })
+            groups.append(
+                {
+                    "content_hash": keep["content_hash"],
+                    "size": len(g),
+                    "keep": {**keep, "filename": Path(keep["file_path"]).name},
+                    "duplicates": [{**d, "filename": Path(d["file_path"]).name} for d in dups],
+                }
+            )
 
         return {
             "total_groups": len(groups),
@@ -332,7 +339,6 @@ class Database:
             "total_files": len(rows),
             "groups": groups,
         }
-
 
     def update_image_meta(
         self,
@@ -350,22 +356,30 @@ class Database:
             if width > 0 and height > 0:
                 cursor.execute(
                     """
-                    UPDATE images 
+                    UPDATE images
                     SET file_size = ?, mtime = ?, content_hash = ?, width = ?, height = ?,
                         duration = COALESCE(NULLIF(?, 0.0), duration)
                     WHERE id = ?
                     """,
-                    (int(file_size), float(mtime), content_hash, int(width), int(height), float(duration), int(image_id))
+                    (
+                        int(file_size),
+                        float(mtime),
+                        content_hash,
+                        int(width),
+                        int(height),
+                        float(duration),
+                        int(image_id),
+                    ),
                 )
             else:
                 cursor.execute(
                     """
-                    UPDATE images 
+                    UPDATE images
                     SET file_size = ?, mtime = ?, content_hash = ?,
                         duration = COALESCE(NULLIF(?, 0.0), duration)
                     WHERE id = ?
                     """,
-                    (int(file_size), float(mtime), content_hash, float(duration), int(image_id))
+                    (int(file_size), float(mtime), content_hash, float(duration), int(image_id)),
                 )
 
     def clear_faces_for_image(self, image_id: int) -> None:
@@ -389,11 +403,11 @@ class Database:
     def insert_face(
         self,
         image_id: int,
-        bbox: Tuple[int, int, int, int],
+        bbox: tuple[int, int, int, int],
         confidence: float,
         embedding: np.ndarray,
         cluster_id: int = -1,
-        person_id: Optional[int] = None,
+        person_id: int | None = None,
     ) -> int:
         """Insert a detected face with its embedding."""
         x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
@@ -402,10 +416,11 @@ class Database:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO faces (image_id, box_x1, box_y1, box_x2, box_y2, confidence, embedding, cluster_id, person_id)
+                INSERT INTO faces (image_id, box_x1, box_y1, box_x2, box_y2, confidence, embedding,
+                                   cluster_id, person_id)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (int(image_id), x1, y1, x2, y2, float(confidence), emb_blob, int(cluster_id), person_id)
+                (int(image_id), x1, y1, x2, y2, float(confidence), emb_blob, int(cluster_id), person_id),
             )
             return cursor.lastrowid or 0
 
@@ -421,7 +436,7 @@ class Database:
             cursor.execute("UPDATE images SET is_favorite = ? WHERE id = ?", (new_val, image_id))
             return bool(new_val)
 
-    def get_image(self, image_id: int) -> Optional[Dict[str, Any]]:
+    def get_image(self, image_id: int) -> dict[str, Any] | None:
         """Retrieve single image metadata with detected faces."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -445,12 +460,13 @@ class Database:
                 try:
                     img["file_size"] = p.stat().st_size
                     updated = True
-                except Exception:
+                except OSError:
                     pass
 
             if img["is_video"] and img["duration"] <= 0.0 and p.is_file():
                 try:
                     import cv2
+
                     cap = cv2.VideoCapture(file_path_str)
                     if cap.isOpened():
                         fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
@@ -459,13 +475,14 @@ class Database:
                         if fps > 0 and frames > 0:
                             img["duration"] = float(frames / fps)
                             updated = True
+                # Non-fatal duration probe; failure just leaves duration at 0.
                 except Exception:
-                    pass
+                    logger.debug("Could not probe video duration for %s", file_path_str, exc_info=True)
 
             if updated:
                 cursor.execute(
                     "UPDATE images SET file_size = ?, duration = ? WHERE id = ?",
-                    (img["file_size"], img["duration"], image_id)
+                    (img["file_size"], img["duration"], image_id),
                 )
 
             img["formatted_size"] = format_file_size(img["file_size"])
@@ -475,20 +492,23 @@ class Database:
             img["file_format"] = f"{ext} Video" if img["is_video"] else (f"{ext} Image" if ext else "Image")
 
             # Fetch associated faces and deduplicate by person/cluster
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT f.id as face_id, f.box_x1, f.box_y1, f.box_x2, f.box_y2,
                        f.confidence, f.cluster_id, f.person_id, p.name as person_name
                 FROM faces f
                 LEFT JOIN people p ON f.person_id = p.id
                 WHERE f.image_id = ?
                 ORDER BY f.confidence DESC
-            """, (image_id,))
-            
-            seen_people: Dict[str, Dict[str, Any]] = {}
+            """,
+                (image_id,),
+            )
+
+            seen_people: dict[str, dict[str, Any]] = {}
             for fr in cursor.fetchall():
                 person_id = fr["person_id"]
                 cluster_id = int(fr["cluster_id"])
-                
+
                 # Key on person_id if named, cluster_id if clustered, or face_id if unclustered
                 if person_id is not None:
                     key = f"p_{person_id}"
@@ -515,7 +535,10 @@ class Database:
             # Priority: Named faces first, then cluster faces, then confidence
             sorted_faces = sorted(
                 seen_people.values(),
-                key=lambda f: (0 if f["person_id"] is not None else (1 if f["cluster_id"] >= 0 else 2), -f["confidence"])
+                key=lambda f: (
+                    0 if f["person_id"] is not None else (1 if f["cluster_id"] >= 0 else 2),
+                    -f["confidence"],
+                ),
             )
             img["faces"] = sorted_faces
             img["face_count"] = len(sorted_faces)
@@ -525,26 +548,28 @@ class Database:
     def get_images(
         self,
         filter_type: str = "all",  # 'all', 'favorites', 'person', 'unclustered'
-        person_id: Optional[int] = None,
-        cluster_id: Optional[int] = None,
-        folder_path: Optional[str] = None,
+        person_id: int | None = None,
+        cluster_id: int | None = None,
+        folder_path: str | None = None,
         folder_direct_only: bool = False,
-        search: Optional[str] = None,
+        search: str | None = None,
         sort_by: str = "date",  # 'date', 'name', 'faces', 'size'
         sort_order: str = "desc",  # 'desc', 'asc'
         page: int = 1,
         limit: int = 60,
-        tag_id: Optional[int] = None,
+        tag_id: int | None = None,
         exclude_duplicates: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Query images with filtering, search, sorting, folder filtering, and pagination."""
         offset = max(0, (page - 1) * limit)
-        params: List[Any] = []
-        where_clauses: List[str] = []
+        params: list[Any] = []
+        where_clauses: list[str] = []
 
         if exclude_duplicates:
             where_clauses.append(
-                "(i.content_hash = '' OR i.id = (SELECT MIN(mi.id) FROM images mi WHERE mi.content_hash = i.content_hash AND mi.content_hash != ''))"
+                "(i.content_hash = '' OR i.id = ("
+                "SELECT MIN(mi.id) FROM images mi "
+                "WHERE mi.content_hash = i.content_hash AND mi.content_hash != ''))"
             )
 
         if filter_type == "favorites":
@@ -565,14 +590,17 @@ class Database:
             norm_folder = str(Path(folder_path).resolve())
             if folder_direct_only:
                 where_clauses.append(
-                    "((i.file_path LIKE ? AND i.file_path NOT LIKE ?) OR (i.file_path LIKE ? AND i.file_path NOT LIKE ?))"
+                    "((i.file_path LIKE ? AND i.file_path NOT LIKE ?) "
+                    "OR (i.file_path LIKE ? AND i.file_path NOT LIKE ?))"
                 )
-                params.extend([
-                    f"{norm_folder}/%",
-                    f"{norm_folder}/%/%",
-                    f"{norm_folder}\\%",
-                    f"{norm_folder}\\%\\%",
-                ])
+                params.extend(
+                    [
+                        f"{norm_folder}/%",
+                        f"{norm_folder}/%/%",
+                        f"{norm_folder}\\%",
+                        f"{norm_folder}\\%\\%",
+                    ]
+                )
             else:
                 where_clauses.append("(i.file_path LIKE ? OR i.file_path LIKE ?)")
                 params.extend([f"{norm_folder}/%", f"{norm_folder}\\%"])
@@ -580,7 +608,9 @@ class Database:
         if search:
             search_like = f"%{search.strip()}%"
             where_clauses.append(
-                "(i.file_path LIKE ? OR i.id IN (SELECT f.image_id FROM faces f JOIN people p ON f.person_id = p.id WHERE p.name LIKE ?))"
+                "(i.file_path LIKE ? OR i.id IN ("
+                "SELECT f.image_id FROM faces f JOIN people p ON f.person_id = p.id "
+                "WHERE p.name LIKE ?))"
             )
             params.extend([search_like, search_like])
 
@@ -599,7 +629,7 @@ class Database:
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            count_query = f"SELECT COUNT(DISTINCT i.id) as total FROM images i {where_sql}"
+            count_query = f"SELECT COUNT(DISTINCT i.id) as total FROM images i {where_sql}"  # noqa: S608
             cursor.execute(count_query, params)
             total_count = cursor.fetchone()["total"]
 
@@ -612,8 +642,8 @@ class Database:
                 GROUP BY i.id
                 {order_sql}
                 LIMIT ? OFFSET ?
-            """
-            cursor.execute(query, params + [limit, offset])
+            """  # noqa: S608
+            cursor.execute(query, [*params, limit, offset])
             rows = cursor.fetchall()
 
             images = []
@@ -621,21 +651,23 @@ class Database:
                 p = Path(r["file_path"])
                 f_size = int(r["file_size"] or 0)
                 dur = float(r["duration"] or 0.0)
-                images.append({
-                    "id": r["id"],
-                    "file_path": r["file_path"],
-                    "filename": p.name,
-                    "is_video": p.suffix.lower() in VIDEO_EXTENSIONS,
-                    "scanned_at": r["scanned_at"],
-                    "is_favorite": bool(r["is_favorite"]),
-                    "width": r["width"] or 0,
-                    "height": r["height"] or 0,
-                    "file_size": f_size,
-                    "formatted_size": format_file_size(f_size),
-                    "duration": dur,
-                    "formatted_duration": format_duration(dur),
-                    "face_count": r["face_count"],
-                })
+                images.append(
+                    {
+                        "id": r["id"],
+                        "file_path": r["file_path"],
+                        "filename": p.name,
+                        "is_video": p.suffix.lower() in VIDEO_EXTENSIONS,
+                        "scanned_at": r["scanned_at"],
+                        "is_favorite": bool(r["is_favorite"]),
+                        "width": r["width"] or 0,
+                        "height": r["height"] or 0,
+                        "file_size": f_size,
+                        "formatted_size": format_file_size(f_size),
+                        "duration": dur,
+                        "formatted_duration": format_duration(dur),
+                        "face_count": r["face_count"],
+                    }
+                )
 
             total_pages = max(1, (total_count + limit - 1) // limit)
             return {
@@ -654,18 +686,18 @@ class Database:
         self,
         image_id: int,
         filter_type: str = "all",
-        person_id: Optional[int] = None,
-        cluster_id: Optional[int] = None,
-        folder_path: Optional[str] = None,
+        person_id: int | None = None,
+        cluster_id: int | None = None,
+        folder_path: str | None = None,
         folder_direct_only: bool = False,
-        search: Optional[str] = None,
+        search: str | None = None,
         sort_by: str = "date",
         sort_order: str = "desc",
-        tag_id: Optional[int] = None,
-        similar_to: Optional[int] = None,
-        threshold: Optional[float] = None,
+        tag_id: int | None = None,
+        similar_to: int | None = None,
+        threshold: float | None = None,
         exclude_duplicates: bool = False,
-    ) -> Dict[str, Optional[int]]:
+    ) -> dict[str, int | None]:
         """Get previous and next image IDs for modal navigation."""
         if similar_to is not None:
             active_threshold = threshold
@@ -699,12 +731,14 @@ class Database:
                 "total_count": len(ids),
             }
 
-        params: List[Any] = []
-        where_clauses: List[str] = []
+        params: list[Any] = []
+        where_clauses: list[str] = []
 
         if exclude_duplicates:
             where_clauses.append(
-                "(i.content_hash = '' OR i.id = (SELECT MIN(mi.id) FROM images mi WHERE mi.content_hash = i.content_hash AND mi.content_hash != ''))"
+                "(i.content_hash = '' OR i.id = ("
+                "SELECT MIN(mi.id) FROM images mi "
+                "WHERE mi.content_hash = i.content_hash AND mi.content_hash != ''))"
             )
 
         if filter_type == "favorites":
@@ -722,21 +756,26 @@ class Database:
             norm_folder = str(Path(folder_path).resolve())
             if folder_direct_only:
                 where_clauses.append(
-                    "((i.file_path LIKE ? AND i.file_path NOT LIKE ?) OR (i.file_path LIKE ? AND i.file_path NOT LIKE ?))"
+                    "((i.file_path LIKE ? AND i.file_path NOT LIKE ?) "
+                    "OR (i.file_path LIKE ? AND i.file_path NOT LIKE ?))"
                 )
-                params.extend([
-                    f"{norm_folder}/%",
-                    f"{norm_folder}/%/%",
-                    f"{norm_folder}\\%",
-                    f"{norm_folder}\\%\\%",
-                ])
+                params.extend(
+                    [
+                        f"{norm_folder}/%",
+                        f"{norm_folder}/%/%",
+                        f"{norm_folder}\\%",
+                        f"{norm_folder}\\%\\%",
+                    ]
+                )
             else:
                 where_clauses.append("(i.file_path LIKE ? OR i.file_path LIKE ?)")
                 params.extend([f"{norm_folder}/%", f"{norm_folder}\\%"])
         if search:
             search_like = f"%{search.strip()}%"
             where_clauses.append(
-                "(i.file_path LIKE ? OR i.id IN (SELECT f.image_id FROM faces f JOIN people p ON f.person_id = p.id WHERE p.name LIKE ?))"
+                "(i.file_path LIKE ? OR i.id IN ("
+                "SELECT f.image_id FROM faces f JOIN people p ON f.person_id = p.id "
+                "WHERE p.name LIKE ?))"
             )
             params.extend([search_like, search_like])
 
@@ -759,7 +798,7 @@ class Database:
             {where_sql}
             GROUP BY i.id
             {order_sql}
-        """
+        """  # noqa: S608
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -781,7 +820,7 @@ class Database:
                 "total_count": len(ids),
             }
 
-    def get_folders(self, current_folder: Optional[str] = None) -> Dict[str, Any]:
+    def get_folders(self, current_folder: str | None = None) -> dict[str, Any]:
         """Extract hierarchical folder structure and subdirectories with photo counts."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -802,8 +841,9 @@ class Database:
         # Find common base directory of all media
         try:
             import os
+
             common_root = Path(os.path.commonpath([str(p.parent) for p in all_paths]))
-        except Exception:
+        except ValueError:
             common_root = all_paths[0].parent
 
         if current_folder:
@@ -814,10 +854,10 @@ class Database:
             target_dir = common_root
 
         # Find immediate subdirectories and direct media
-        subfolder_counts: Dict[str, Dict[str, Any]] = {}
+        subfolder_counts: dict[str, dict[str, Any]] = {}
         direct_images_count = 0
 
-        for r, p in zip(rows, all_paths):
+        for r, p in zip(rows, all_paths, strict=False):
             parent = p.parent
             if parent == target_dir:
                 direct_images_count += 1
@@ -830,13 +870,15 @@ class Database:
                     subfolder_counts[top_child_name] = {
                         "name": top_child_name,
                         "full_path": child_full_path,
-                        "rel_path": str(Path(child_full_path).relative_to(common_root)) if child_full_path != str(common_root) else "",
+                        "rel_path": str(Path(child_full_path).relative_to(common_root))
+                        if child_full_path != str(common_root)
+                        else "",
                         "item_count": 0,
                         "cover_image_id": r["id"],
                     }
                 subfolder_counts[top_child_name]["item_count"] += 1
 
-        subfolders = sorted(list(subfolder_counts.values()), key=lambda x: x["name"].lower())
+        subfolders = sorted(subfolder_counts.values(), key=lambda x: x["name"].lower())
 
         # Build breadcrumbs
         breadcrumbs = [{"name": "Root", "path": str(common_root)}]
@@ -863,11 +905,13 @@ class Database:
             "direct_images_count": direct_images_count,
         }
 
-    def get_people(self, search: Optional[str] = None, cluster_limit: Optional[int] = None, hide_low_quality: bool = False) -> List[Dict[str, Any]]:
+    def get_people(
+        self, search: str | None = None, cluster_limit: int | None = None, hide_low_quality: bool = False
+    ) -> list[dict[str, Any]]:
         """Retrieve all people and unnamed clusters with face count, photo count, and cover face ID."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            
+
             # 1. First fetch explicitly created / named people (appear on top)
             query = """
                 SELECT p.id as person_id, p.name, p.cover_face_id, p.created_at,
@@ -882,23 +926,27 @@ class Database:
             cursor.execute(query)
             people = []
             for r in cursor.fetchall():
-                people.append({
-                    "id": r["person_id"],
-                    "type": "person",
-                    "is_named": True,
-                    "name": r["name"],
-                    "cover_face_id": r["cover_face_id"] or r["fallback_face_id"],
-                    "face_count": r["face_count"],
-                    "photo_count": r["photo_count"],
-                })
+                people.append(
+                    {
+                        "id": r["person_id"],
+                        "type": "person",
+                        "is_named": True,
+                        "name": r["name"],
+                        "cover_face_id": r["cover_face_id"] or r["fallback_face_id"],
+                        "face_count": r["face_count"],
+                        "photo_count": r["photo_count"],
+                    }
+                )
 
             # 2. Then include unnamed clusters that have cluster_id >= 0 but no person_id
             cluster_limit_sql = f"LIMIT {int(cluster_limit)}" if cluster_limit else ""
             cluster_quality_filter = ""
             cluster_having = ""
-            cluster_params: List[Any] = []
+            cluster_params: list[Any] = []
             if hide_low_quality:
-                cluster_quality_filter = " AND (f.box_x2 - f.box_x1) >= ? AND (f.box_y2 - f.box_y1) >= ? AND f.confidence >= ?"
+                cluster_quality_filter = (
+                    " AND (f.box_x2 - f.box_x1) >= ? AND (f.box_y2 - f.box_y1) >= ? AND f.confidence >= ?"
+                )
                 cluster_having = " HAVING COUNT(DISTINCT f.image_id) > 1"
                 cluster_params = [LOW_QUALITY_FACE_MIN_SIDE, LOW_QUALITY_FACE_MIN_SIDE, LOW_QUALITY_FACE_MIN_CONF]
             cluster_query = f"""
@@ -913,19 +961,21 @@ class Database:
                 {cluster_having}
                 ORDER BY photo_count DESC, face_count DESC
                 {cluster_limit_sql}
-            """
+            """  # noqa: S608
             cursor.execute(cluster_query, cluster_params)
             for r in cursor.fetchall():
-                people.append({
-                    "id": r["cluster_id"],
-                    "type": "cluster",
-                    "is_named": False,
-                    "name": f"Person #{r['cluster_id']}",
-                    "cover_face_id": r["cover_face_id"],
-                    "face_count": r["face_count"],
-                    "photo_count": r["photo_count"],
-                    "cluster_id": r["cluster_id"],
-                })
+                people.append(
+                    {
+                        "id": r["cluster_id"],
+                        "type": "cluster",
+                        "is_named": False,
+                        "name": f"Person #{r['cluster_id']}",
+                        "cover_face_id": r["cover_face_id"],
+                        "face_count": r["face_count"],
+                        "photo_count": r["photo_count"],
+                        "cluster_id": r["cluster_id"],
+                    }
+                )
 
             if search:
                 s = search.lower().strip()
@@ -933,11 +983,12 @@ class Database:
 
             return people
 
-    def get_person(self, person_id: int) -> Optional[Dict[str, Any]]:
+    def get_person(self, person_id: int) -> dict[str, Any] | None:
         """Get person profile info by ID."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT p.id, p.name, p.cover_face_id, p.created_at,
                        COUNT(DISTINCT f.id) as face_count,
                        COUNT(DISTINCT f.image_id) as photo_count,
@@ -946,7 +997,9 @@ class Database:
                 LEFT JOIN faces f ON f.person_id = p.id
                 WHERE p.id = ?
                 GROUP BY p.id
-            """, (person_id,))
+            """,
+                (person_id,),
+            )
             row = cursor.fetchone()
             if not row:
                 return None
@@ -959,12 +1012,16 @@ class Database:
                 "photo_count": row["photo_count"],
             }
 
-    def name_person(self, name: str, cluster_id: Optional[int] = None, person_id: Optional[int] = None, face_id: Optional[int] = None) -> int:
+    def name_person(
+        self, name: str, cluster_id: int | None = None, person_id: int | None = None, face_id: int | None = None
+    ) -> int:
         """
         Assign or update a person name:
-        - If person_id is given, rename that person (updates across all associated photos and videos).
-        - If cluster_id is given, create or associate person with this name and link all faces in cluster across all media.
-        - If face_id is given, resolve its cluster and link all matching faces in that cluster across all photos and videos.
+        - If person_id is given, rename that person (updates across all associated media).
+        - If cluster_id is given, create/associate a person with this name and link all
+          faces in the cluster across all media.
+        - If face_id is given, resolve its cluster and link all matching faces in that
+          cluster across all photos and videos.
         """
         name = name.strip()
         if not name:
@@ -977,9 +1034,8 @@ class Database:
             if face_id:
                 cursor.execute("SELECT cluster_id FROM faces WHERE id = ?", (face_id,))
                 fr = cursor.fetchone()
-                if fr:
-                    if cluster_id is None and fr["cluster_id"] is not None and fr["cluster_id"] >= 0:
-                        cluster_id = fr["cluster_id"]
+                if fr and cluster_id is None and fr["cluster_id"] is not None and fr["cluster_id"] >= 0:
+                    cluster_id = fr["cluster_id"]
 
             if person_id:
                 # Rename existing person record
@@ -1027,7 +1083,9 @@ class Database:
                 cursor.execute("SELECT cover_face_id FROM people WHERE id = ?", (source_person_id,))
                 src_row = cursor.fetchone()
                 if src_row and src_row["cover_face_id"]:
-                    cursor.execute("UPDATE people SET cover_face_id = ? WHERE id = ?", (src_row["cover_face_id"], target_person_id))
+                    cursor.execute(
+                        "UPDATE people SET cover_face_id = ? WHERE id = ?", (src_row["cover_face_id"], target_person_id)
+                    )
 
             cursor.execute("UPDATE faces SET person_id = ? WHERE person_id = ?", (target_person_id, source_person_id))
             cursor.execute("DELETE FROM people WHERE id = ?", (source_person_id,))
@@ -1036,7 +1094,10 @@ class Database:
         """Merge all faces from source_person into target_cluster, then delete source_person."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("UPDATE faces SET cluster_id = ?, person_id = NULL WHERE person_id = ?", (target_cluster_id, source_person_id))
+            cursor.execute(
+                "UPDATE faces SET cluster_id = ?, person_id = NULL WHERE person_id = ?",
+                (target_cluster_id, source_person_id),
+            )
             cursor.execute("DELETE FROM people WHERE id = ?", (source_person_id,))
 
     def merge_cluster_into_person(self, source_cluster_id: int, target_person_id: int) -> None:
@@ -1051,16 +1112,19 @@ class Database:
             return
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("UPDATE faces SET cluster_id = ?, person_id = NULL WHERE cluster_id = ?", (target_cluster_id, source_cluster_id))
+            cursor.execute(
+                "UPDATE faces SET cluster_id = ?, person_id = NULL WHERE cluster_id = ?",
+                (target_cluster_id, source_cluster_id),
+            )
 
     def move_face(
         self,
         face_id: int,
-        target_person_id: Optional[int] = None,
-        target_cluster_id: Optional[int] = None,
-        new_person_name: Optional[str] = None,
+        target_person_id: int | None = None,
+        target_cluster_id: int | None = None,
+        new_person_name: str | None = None,
         unlink: bool = False,
-    ) -> Optional[int]:
+    ) -> int | None:
         """
         Move a face to a target person, cluster, new person, or unlink it.
         Returns the resulting person_id if assigned to a person, else None.
@@ -1111,15 +1175,18 @@ class Database:
                         "INSERT OR IGNORE INTO person_exclusions (face_id, person_id) VALUES (?, ?)",
                         (face_id, current_person_id),
                     )
-                cursor.execute("UPDATE faces SET cluster_id = ?, person_id = NULL WHERE id = ?", (target_cluster_id, face_id))
+                cursor.execute(
+                    "UPDATE faces SET cluster_id = ?, person_id = NULL WHERE id = ?", (target_cluster_id, face_id)
+                )
                 return None
             return None
 
-    def get_face(self, face_id: int) -> Optional[Dict[str, Any]]:
+    def get_face(self, face_id: int) -> dict[str, Any] | None:
         """Retrieve single face detection info."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT f.id, f.image_id, f.box_x1, f.box_y1, f.box_x2, f.box_y2,
                        f.confidence, f.embedding, f.cluster_id, f.person_id,
                        i.file_path, p.name as person_name
@@ -1127,7 +1194,9 @@ class Database:
                 JOIN images i ON f.image_id = i.id
                 LEFT JOIN people p ON f.person_id = p.id
                 WHERE f.id = ?
-            """, (face_id,))
+            """,
+                (face_id,),
+            )
             r = cursor.fetchone()
             if not r:
                 return None
@@ -1143,7 +1212,7 @@ class Database:
                 "person_name": r["person_name"],
             }
 
-    def get_all_unclustered_or_all_faces(self) -> List[Dict[str, Any]]:
+    def get_all_unclustered_or_all_faces(self) -> list[dict[str, Any]]:
         """Retrieve all face records and their deserialized embeddings."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -1157,29 +1226,31 @@ class Database:
             rows = cursor.fetchall()
             results = []
             for r in rows:
-                results.append({
-                    "id": r["id"],
-                    "image_id": r["image_id"],
-                    "bbox": (int(r["box_x1"]), int(r["box_y1"]), int(r["box_x2"]), int(r["box_y2"])),
-                    "confidence": float(r["confidence"]),
-                    "embedding": self.deserialize_embedding(r["embedding"]),
-                    "cluster_id": int(r["cluster_id"]),
-                    "person_id": r["person_id"],
-                    "file_path": r["file_path"],
-                })
+                results.append(
+                    {
+                        "id": r["id"],
+                        "image_id": r["image_id"],
+                        "bbox": (int(r["box_x1"]), int(r["box_y1"]), int(r["box_x2"]), int(r["box_y2"])),
+                        "confidence": float(r["confidence"]),
+                        "embedding": self.deserialize_embedding(r["embedding"]),
+                        "cluster_id": int(r["cluster_id"]),
+                        "person_id": r["person_id"],
+                        "file_path": r["file_path"],
+                    }
+                )
             return results
 
-    def update_face_clusters(self, face_ids: List[int], cluster_ids: List[int]) -> None:
+    def update_face_clusters(self, face_ids: list[int], cluster_ids: list[int]) -> None:
         """Update cluster IDs for a batch of faces."""
         if len(face_ids) != len(cluster_ids):
             raise ValueError("face_ids and cluster_ids must have the same length")
         with self._get_connection() as conn:
             conn.executemany(
                 "UPDATE faces SET cluster_id = ? WHERE id = ?",
-                [(int(c_id), int(f_id)) for f_id, c_id in zip(face_ids, cluster_ids)]
+                [(int(c_id), int(f_id)) for f_id, c_id in zip(face_ids, cluster_ids, strict=False)],
             )
 
-    def get_summary_stats(self) -> Dict[str, Any]:
+    def get_summary_stats(self) -> dict[str, Any]:
         """Compute summary statistics for the database."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -1232,11 +1303,12 @@ class Database:
                 "unclustered_faces": unclustered_count,
             }
 
-    def inspect_cluster(self, cluster_id: int) -> Dict[str, Any]:
+    def inspect_cluster(self, cluster_id: int) -> dict[str, Any]:
         """Retrieve all details and associated image paths for a given cluster."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT
                     f.id as face_id,
                     f.box_x1, f.box_y1, f.box_x2, f.box_y2,
@@ -1247,26 +1319,30 @@ class Database:
                 JOIN images i ON f.image_id = i.id
                 WHERE f.cluster_id = ?
                 ORDER BY i.file_path ASC, f.id ASC
-            """, (cluster_id,))
+            """,
+                (cluster_id,),
+            )
             rows = cursor.fetchall()
 
             faces = []
             image_paths = set()
             for r in rows:
                 image_paths.add(r["file_path"])
-                faces.append({
-                    "face_id": r["face_id"],
-                    "image_id": r["image_id"],
-                    "file_path": r["file_path"],
-                    "bbox": (int(r["box_x1"]), int(r["box_y1"]), int(r["box_x2"]), int(r["box_y2"])),
-                    "confidence": float(r["confidence"]),
-                })
+                faces.append(
+                    {
+                        "face_id": r["face_id"],
+                        "image_id": r["image_id"],
+                        "file_path": r["file_path"],
+                        "bbox": (int(r["box_x1"]), int(r["box_y1"]), int(r["box_x2"]), int(r["box_y2"])),
+                        "confidence": float(r["confidence"]),
+                    }
+                )
 
             return {
                 "cluster_id": cluster_id,
                 "total_faces": len(faces),
                 "total_images": len(image_paths),
-                "image_paths": sorted(list(image_paths)),
+                "image_paths": sorted(image_paths),
                 "faces": faces,
             }
 
@@ -1293,25 +1369,26 @@ class Database:
             cursor = conn.cursor()
             cursor.execute(
                 "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (str(key), str(value))
+                (str(key), str(value)),
             )
 
-    def get_all_settings(self) -> Dict[str, str]:
+    def get_all_settings(self) -> dict[str, str]:
         """Retrieve all stored settings as a dictionary."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT key, value FROM settings")
             return {r["key"]: r["value"] for r in cursor.fetchall()}
 
-    def set_settings(self, settings_dict: Dict[str, Any]) -> None:
+    def set_settings(self, settings_dict: dict[str, Any]) -> None:
         """Batch save multiple settings."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             for k, v in settings_dict.items():
                 if v is not None:
                     cursor.execute(
-                        "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                        (str(k), str(v))
+                        "INSERT INTO settings (key, value) VALUES (?, ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        (str(k), str(v)),
                     )
 
     def add_person_exclusion(self, face_id: int, person_id: int) -> None:
@@ -1319,23 +1396,22 @@ class Database:
         with self._get_connection() as conn:
             conn.execute(
                 "INSERT OR IGNORE INTO person_exclusions (face_id, person_id) VALUES (?, ?)",
-                (int(face_id), int(person_id))
+                (int(face_id), int(person_id)),
             )
 
     def remove_person_exclusion(self, face_id: int, person_id: int) -> None:
         """Remove a cannot-link exclusion."""
         with self._get_connection() as conn:
             conn.execute(
-                "DELETE FROM person_exclusions WHERE face_id = ? AND person_id = ?",
-                (int(face_id), int(person_id))
+                "DELETE FROM person_exclusions WHERE face_id = ? AND person_id = ?", (int(face_id), int(person_id))
             )
 
-    def get_person_exclusions(self) -> Dict[int, Set[int]]:
+    def get_person_exclusions(self) -> dict[int, set[int]]:
         """Retrieve mapping of {face_id: set_of_excluded_person_ids}."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT face_id, person_id FROM person_exclusions")
-            exclusions: Dict[int, Set[int]] = {}
+            exclusions: dict[int, set[int]] = {}
             for r in cursor.fetchall():
                 f_id = int(r["face_id"])
                 p_id = int(r["person_id"])
@@ -1344,7 +1420,7 @@ class Database:
                 exclusions[f_id].add(p_id)
             return exclusions
 
-    def get_all_person_exemplars(self, max_exemplars: int = 5) -> Dict[int, List[np.ndarray]]:
+    def get_all_person_exemplars(self, max_exemplars: int = 5) -> dict[int, list[np.ndarray]]:
         """
         Retrieve multi-exemplar embeddings for all named people in the database.
         Returns {person_id: [exemplar_vec1, exemplar_vec2, ...]}.
@@ -1359,7 +1435,7 @@ class Database:
                 WHERE person_id IS NOT NULL
                 ORDER BY person_id ASC, id ASC
             """)
-            person_embeddings: Dict[int, List[np.ndarray]] = {}
+            person_embeddings: dict[int, list[np.ndarray]] = {}
             for r in cursor.fetchall():
                 p_id = int(r["person_id"])
                 emb = self.deserialize_embedding(r["embedding"])
@@ -1367,28 +1443,31 @@ class Database:
                     person_embeddings[p_id] = []
                 person_embeddings[p_id].append(emb)
 
-            exemplars: Dict[int, List[np.ndarray]] = {}
+            exemplars: dict[int, list[np.ndarray]] = {}
             for p_id, embs in person_embeddings.items():
                 exemplars[p_id] = select_k_medoids(embs, k=max_exemplars)
 
             return exemplars
 
-    def get_person_exemplars(self, person_id: int, max_exemplars: int = 5) -> List[np.ndarray]:
+    def get_person_exemplars(self, person_id: int, max_exemplars: int = 5) -> list[np.ndarray]:
         """Retrieve multi-exemplar embeddings for a single person."""
         from app.recognition import select_k_medoids
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT embedding
                 FROM faces
                 WHERE person_id = ?
                 ORDER BY id ASC
-            """, (int(person_id),))
+            """,
+                (int(person_id),),
+            )
             embs = [self.deserialize_embedding(r["embedding"]) for r in cursor.fetchall()]
             return select_k_medoids(embs, k=max_exemplars)
 
-    def get_unassigned_faces(self) -> List[Dict[str, Any]]:
+    def get_unassigned_faces(self) -> list[dict[str, Any]]:
         """Retrieve all faces that currently have no person_id assigned."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -1403,19 +1482,21 @@ class Database:
             rows = cursor.fetchall()
             results = []
             for r in rows:
-                results.append({
-                    "id": int(r["id"]),
-                    "image_id": int(r["image_id"]),
-                    "bbox": (int(r["box_x1"]), int(r["box_y1"]), int(r["box_x2"]), int(r["box_y2"])),
-                    "confidence": float(r["confidence"]),
-                    "embedding": self.deserialize_embedding(r["embedding"]),
-                    "cluster_id": int(r["cluster_id"]),
-                    "person_id": None,
-                    "file_path": r["file_path"],
-                })
+                results.append(
+                    {
+                        "id": int(r["id"]),
+                        "image_id": int(r["image_id"]),
+                        "bbox": (int(r["box_x1"]), int(r["box_y1"]), int(r["box_x2"]), int(r["box_y2"])),
+                        "confidence": float(r["confidence"]),
+                        "embedding": self.deserialize_embedding(r["embedding"]),
+                        "cluster_id": int(r["cluster_id"]),
+                        "person_id": None,
+                        "file_path": r["file_path"],
+                    }
+                )
             return results
 
-    def get_orphan_faces(self) -> List[Dict[str, Any]]:
+    def get_orphan_faces(self) -> list[dict[str, Any]]:
         """Retrieve unassigned faces that are not yet inside any cluster (cluster_id < 0)."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -1430,19 +1511,21 @@ class Database:
             rows = cursor.fetchall()
             results = []
             for r in rows:
-                results.append({
-                    "id": int(r["id"]),
-                    "image_id": int(r["image_id"]),
-                    "bbox": (int(r["box_x1"]), int(r["box_y1"]), int(r["box_x2"]), int(r["box_y2"])),
-                    "confidence": float(r["confidence"]),
-                    "embedding": self.deserialize_embedding(r["embedding"]),
-                    "cluster_id": int(r["cluster_id"]),
-                    "person_id": None,
-                    "file_path": r["file_path"],
-                })
+                results.append(
+                    {
+                        "id": int(r["id"]),
+                        "image_id": int(r["image_id"]),
+                        "bbox": (int(r["box_x1"]), int(r["box_y1"]), int(r["box_x2"]), int(r["box_y2"])),
+                        "confidence": float(r["confidence"]),
+                        "embedding": self.deserialize_embedding(r["embedding"]),
+                        "cluster_id": int(r["cluster_id"]),
+                        "person_id": None,
+                        "file_path": r["file_path"],
+                    }
+                )
             return results
 
-    def get_all_cluster_exemplars(self, max_exemplars: int = 5) -> Dict[int, List[np.ndarray]]:
+    def get_all_cluster_exemplars(self, max_exemplars: int = 5) -> dict[int, list[np.ndarray]]:
         """
         Retrieve multi-exemplar embeddings for all unnamed clusters (cluster_id >= 0, person_id IS NULL).
         Returns {cluster_id: [exemplar_vec1, ...]}.
@@ -1457,7 +1540,7 @@ class Database:
                 WHERE cluster_id >= 0 AND person_id IS NULL
                 ORDER BY cluster_id ASC, id ASC
             """)
-            cluster_embeddings: Dict[int, List[np.ndarray]] = {}
+            cluster_embeddings: dict[int, list[np.ndarray]] = {}
             for r in cursor.fetchall():
                 cid = int(r["cluster_id"])
                 emb = self.deserialize_embedding(r["embedding"])
@@ -1465,13 +1548,13 @@ class Database:
                     cluster_embeddings[cid] = []
                 cluster_embeddings[cid].append(emb)
 
-            exemplars: Dict[int, List[np.ndarray]] = {}
+            exemplars: dict[int, list[np.ndarray]] = {}
             for cid, embs in cluster_embeddings.items():
                 exemplars[cid] = select_k_medoids(embs, k=max_exemplars)
 
             return exemplars
 
-    def assign_faces_to_cluster(self, face_ids: List[int], cluster_id: int) -> None:
+    def assign_faces_to_cluster(self, face_ids: list[int], cluster_id: int) -> None:
         """Batch assign a list of face IDs to an existing cluster."""
         if not face_ids:
             return
@@ -1479,11 +1562,11 @@ class Database:
             cursor = conn.cursor()
             placeholders = ",".join("?" for _ in face_ids)
             cursor.execute(
-                f"UPDATE faces SET cluster_id = ? WHERE id IN ({placeholders})",
+                f"UPDATE faces SET cluster_id = ? WHERE id IN ({placeholders})",  # noqa: S608
                 [int(cluster_id)] + [int(fid) for fid in face_ids],
             )
 
-    def get_video_faces_for_merge(self) -> List[Dict[str, Any]]:
+    def get_video_faces_for_merge(self) -> list[dict[str, Any]]:
         """Get faces from video media for intra-video merge pass. Named faces included as anchor identities."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -1498,25 +1581,28 @@ class Database:
                 fp = r["file_path"]
                 if not fp or Path(fp).suffix.lower() not in VIDEO_EXTENSIONS:
                     continue
-                rows.append({
-                    "id": int(r["id"]),
-                    "image_id": int(r["image_id"]),
-                    "embedding": self.deserialize_embedding(r["embedding"]),
-                    "person_id": int(r["person_id"]) if r["person_id"] is not None else None,
-                    "cluster_id": int(r["cluster_id"]),
-                })
+                rows.append(
+                    {
+                        "id": int(r["id"]),
+                        "image_id": int(r["image_id"]),
+                        "embedding": self.deserialize_embedding(r["embedding"]),
+                        "person_id": int(r["person_id"]) if r["person_id"] is not None else None,
+                        "cluster_id": int(r["cluster_id"]),
+                    }
+                )
             return rows
 
-    def get_face_ids_by_clusters(self, cluster_ids: List[int]) -> Dict[int, List[int]]:
+    def get_face_ids_by_clusters(self, cluster_ids: list[int]) -> dict[int, list[int]]:
         """Return {cluster_id: [face_ids]} for all faces in the given unnamed clusters."""
         if not cluster_ids:
             return {}
-        result: Dict[int, List[int]] = {}
+        result: dict[int, list[int]] = {}
         with self._get_connection() as conn:
             cursor = conn.cursor()
             placeholders = ",".join("?" for _ in cluster_ids)
             cursor.execute(
-                f"SELECT cluster_id, id FROM faces WHERE cluster_id IN ({placeholders}) AND person_id IS NULL ORDER BY id ASC",
+                f"SELECT cluster_id, id FROM faces WHERE cluster_id IN ({placeholders}) "  # noqa: S608
+                "AND person_id IS NULL ORDER BY id ASC",
                 [int(cid) for cid in cluster_ids],
             )
             for r in cursor.fetchall():
@@ -1532,7 +1618,7 @@ class Database:
             row = cursor.fetchone()
             return int(row["mc"]) if row and row["mc"] is not None else -1
 
-    def assign_faces_to_person(self, face_ids: List[int], person_id: int) -> None:
+    def assign_faces_to_person(self, face_ids: list[int], person_id: int) -> None:
         """Batch assign a list of face IDs to a person."""
         if not face_ids:
             return
@@ -1540,15 +1626,16 @@ class Database:
             cursor = conn.cursor()
             placeholders = ",".join("?" for _ in face_ids)
             cursor.execute(
-                f"UPDATE faces SET person_id = ? WHERE id IN ({placeholders})",
-                [int(person_id)] + [int(fid) for fid in face_ids]
+                f"UPDATE faces SET person_id = ? WHERE id IN ({placeholders})",  # noqa: S608
+                [int(person_id)] + [int(fid) for fid in face_ids],
             )
             # Clear any exclusions for this person
             cursor.execute(
-                f"DELETE FROM person_exclusions WHERE person_id = ? AND face_id IN ({placeholders})",
-                [int(person_id)] + [int(fid) for fid in face_ids]
+                f"DELETE FROM person_exclusions WHERE person_id = ? AND face_id IN ({placeholders})",  # noqa: S608
+                [int(person_id)] + [int(fid) for fid in face_ids],
             )
-    def update_folder_paths(self, old_dir: str, new_dir: str) -> List[str]:
+
+    def update_folder_paths(self, old_dir: str, new_dir: str) -> list[str]:
         """Rewrite file_path for every image under old_dir to sit under new_dir after a folder rename.
 
         Returns the list of old file paths that were updated so callers can invalidate cache.
@@ -1565,7 +1652,7 @@ class Database:
             rows = cursor.fetchall()
             old_paths = [r["file_path"] for r in rows]
             for r in rows:
-                rel = r["file_path"][len(old_prefix):]
+                rel = r["file_path"][len(old_prefix) :]
                 cursor.execute(
                     "UPDATE images SET file_path = ? WHERE id = ?",
                     (new_prefix + rel, r["id"]),
@@ -1584,17 +1671,17 @@ class Database:
                 (resolved, mtime, file_size, int(image_id)),
             )
 
-    def delete_image_records(self, image_ids: List[int]) -> int:
+    def delete_image_records(self, image_ids: list[int]) -> int:
         """Delete specific image records by IDs (cascades to faces & exclusions)."""
         if not image_ids:
             return 0
         with self._get_connection() as conn:
             cursor = conn.cursor()
             placeholders = ",".join("?" for _ in image_ids)
-            cursor.execute(f"DELETE FROM images WHERE id IN ({placeholders})", [int(i) for i in image_ids])
+            cursor.execute(f"DELETE FROM images WHERE id IN ({placeholders})", [int(i) for i in image_ids])  # noqa: S608
             return cursor.rowcount
 
-    def clone_image_record(self, source_image_id: int, new_path: str) -> Optional[int]:
+    def clone_image_record(self, source_image_id: int, new_path: str) -> int | None:
         """Clone an image and all its face detections/embeddings for a copied file."""
         resolved = str(Path(new_path).resolve())
         p = Path(resolved)
@@ -1633,7 +1720,8 @@ class Database:
             for sf in src_faces:
                 cursor.execute(
                     """
-                    INSERT INTO faces (image_id, box_x1, box_y1, box_x2, box_y2, confidence, embedding, cluster_id, person_id)
+                    INSERT INTO faces (image_id, box_x1, box_y1, box_x2, box_y2, confidence,
+                                       embedding, cluster_id, person_id)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
@@ -1658,7 +1746,7 @@ class Database:
                 )
             return new_image_id
 
-    def get_all_folder_paths(self) -> List[str]:
+    def get_all_folder_paths(self) -> list[str]:
         """Return a sorted list of all unique folder paths containing indexed images."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -1668,14 +1756,14 @@ class Database:
             for r in rows:
                 if r["file_path"]:
                     folders.add(str(Path(r["file_path"]).parent.resolve()))
-            
+
             # Also add root scan dir from settings if configured
             input_dir = self.get_setting("input_dir")
             if input_dir and Path(input_dir).exists():
                 folders.add(str(Path(input_dir).resolve()))
-            return sorted(list(folders))
+            return sorted(folders)
 
-    def batch_toggle_favorites(self, image_ids: List[int], is_favorite: bool) -> int:
+    def batch_toggle_favorites(self, image_ids: list[int], is_favorite: bool) -> int:
         """Batch set favorite status for multiple images."""
         if not image_ids:
             return 0
@@ -1684,12 +1772,12 @@ class Database:
             cursor = conn.cursor()
             placeholders = ",".join("?" for _ in image_ids)
             cursor.execute(
-                f"UPDATE images SET is_favorite = ? WHERE id IN ({placeholders})",
+                f"UPDATE images SET is_favorite = ? WHERE id IN ({placeholders})",  # noqa: S608
                 [val] + [int(i) for i in image_ids],
             )
             return cursor.rowcount
 
-    def add_tag(self, name: str) -> Optional[int]:
+    def add_tag(self, name: str) -> int | None:
         """Create a tag if missing, else return existing tag id. Returns None for blank names."""
         name = (name or "").strip()
         if not name:
@@ -1703,23 +1791,26 @@ class Database:
             cursor.execute("INSERT INTO tags (name) VALUES (?)", (name,))
             return int(cursor.lastrowid)
 
-    def get_tag(self, tag_id: int) -> Optional[Dict[str, Any]]:
+    def get_tag(self, tag_id: int) -> dict[str, Any] | None:
         """Retrieve a single tag by ID."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT t.id, t.name, COUNT(it.image_id) as photo_count
                 FROM tags t
                 LEFT JOIN image_tags it ON it.tag_id = t.id
                 WHERE t.id = ?
                 GROUP BY t.id
-            """, (int(tag_id),))
+            """,
+                (int(tag_id),),
+            )
             row = cursor.fetchone()
             if not row:
                 return None
             return {"id": row["id"], "name": row["name"], "photo_count": row["photo_count"]}
 
-    def get_all_tags(self, search: Optional[str] = None) -> List[Dict[str, Any]]:
+    def get_all_tags(self, search: str | None = None) -> list[dict[str, Any]]:
         """Retrieve all tags with photo counts, sorted by name."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -1728,7 +1819,7 @@ class Database:
                 FROM tags t
                 LEFT JOIN image_tags it ON it.tag_id = t.id
             """
-            params: List[Any] = []
+            params: list[Any] = []
             if search and search.strip():
                 query += " WHERE t.name LIKE ?"
                 params.append(f"%{search.strip()}%")
@@ -1736,20 +1827,23 @@ class Database:
             cursor.execute(query, params)
             return [{"id": r["id"], "name": r["name"], "photo_count": r["photo_count"]} for r in cursor.fetchall()]
 
-    def get_image_tags(self, image_id: int) -> List[Dict[str, Any]]:
+    def get_image_tags(self, image_id: int) -> list[dict[str, Any]]:
         """Retrieve tags assigned to an image."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT t.id, t.name
                 FROM tags t
                 JOIN image_tags it ON it.tag_id = t.id
                 WHERE it.image_id = ?
                 ORDER BY t.name COLLATE NOCASE ASC
-            """, (int(image_id),))
+            """,
+                (int(image_id),),
+            )
             return [{"id": r["id"], "name": r["name"]} for r in cursor.fetchall()]
 
-    def add_tags_to_image(self, image_id: int, tag_names: List[str]) -> int:
+    def add_tags_to_image(self, image_id: int, tag_names: list[str]) -> int:
         """Assign a list of tags to an image. Existing tags are reused. Returns count added.
 
         When the image has a content fingerprint, the tags are also applied to every
@@ -1799,16 +1893,19 @@ class Database:
         blob = self.serialize_embedding(embedding)
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(
+                """
                 INSERT INTO media_embeddings (image_id, embedding, model)
                 VALUES (?, ?, ?)
                 ON CONFLICT(image_id) DO UPDATE SET
                     embedding = excluded.embedding,
                     model = excluded.model,
                     created_at = CURRENT_TIMESTAMP
-            """, (int(image_id), blob, model))
+            """,
+                (int(image_id), blob, model),
+            )
 
-    def get_media_embedding(self, image_id: int) -> Optional[np.ndarray]:
+    def get_media_embedding(self, image_id: int) -> np.ndarray | None:
         """Retrieve whole-media visual embedding for an image."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -1818,9 +1915,9 @@ class Database:
                 return self.deserialize_embedding(row["embedding"])
             return None
 
-    def get_all_media_embeddings(self) -> Dict[int, np.ndarray]:
+    def get_all_media_embeddings(self) -> dict[int, np.ndarray]:
         """Retrieve all media embeddings as a dictionary of image_id -> vector."""
-        result: Dict[int, np.ndarray] = {}
+        result: dict[int, np.ndarray] = {}
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT image_id, embedding FROM media_embeddings")
@@ -1828,7 +1925,7 @@ class Database:
                 result[row["image_id"]] = self.deserialize_embedding(row["embedding"])
         return result
 
-    def get_media_embedding_stats(self) -> Dict[str, int]:
+    def get_media_embedding_stats(self) -> dict[str, int]:
         """Return count of total images vs indexed media embeddings."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -1838,7 +1935,7 @@ class Database:
             embedded = cursor.fetchone()["embedded"]
             return {"total_images": total, "embedded_images": embedded, "missing": max(0, total - embedded)}
 
-    def get_unembedded_image_ids(self) -> List[int]:
+    def get_unembedded_image_ids(self) -> list[int]:
         """Retrieve all image IDs that lack a media embedding."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -1857,7 +1954,7 @@ class Database:
         threshold: float = 0.60,
         page: int = 1,
         exclude_duplicates: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Find and return images visually and semantically similar to image_id,
         sorted by cosine similarity descending.
@@ -1939,9 +2036,7 @@ class Database:
         sorted_valid = valid_indices[np.argsort(-sims[valid_indices])]
 
         # Include main/target image at index 0, followed by similar candidates
-        ranked_matches: List[Tuple[int, float]] = [
-            (int(image_id), 1.0)
-        ] + [
+        ranked_matches: list[tuple[int, float]] = [(int(image_id), 1.0)] + [
             (candidate_ids[idx], float(sims[idx])) for idx in sorted_valid
         ]
 
@@ -1977,7 +2072,7 @@ class Database:
 
             if img:
                 img["similarity_score"] = score
-                img["similarity_pct"] = int(round(score * 100))
+                img["similarity_pct"] = round(score * 100)
                 img["face_count"] = img.get("face_count", len(img.get("faces", [])))
                 images_list.append(img)
 
@@ -1995,7 +2090,7 @@ class Database:
         image_id: int,
         top_k: int = 15,
         min_score: float = 0.50,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Suggest tags for an image using k-NN tag transfer from similar media.
         Returns ranked list of candidate tags with confidence scores.
@@ -2045,16 +2140,19 @@ class Database:
         neighbor_sims = {candidate_ids[idx]: float(sims[idx]) for idx in top_indices}
 
         # Query tags for these neighbors
-        tag_scores: Dict[int, Dict[str, Any]] = {}
+        tag_scores: dict[int, dict[str, Any]] = {}
         with self._get_connection() as conn:
             cursor = conn.cursor()
             placeholders = ",".join("?" for _ in neighbor_ids)
-            cursor.execute(f"""
+            cursor.execute(
+                f"""
                 SELECT it.image_id, t.id as tag_id, t.name as tag_name
                 FROM image_tags it
                 JOIN tags t ON t.id = it.tag_id
                 WHERE it.image_id IN ({placeholders})
-            """, neighbor_ids)
+            """,  # noqa: S608
+                neighbor_ids,
+            )
             rows = cursor.fetchall()
 
         total_sim_weight = sum(neighbor_sims.values()) + 1e-9
@@ -2075,8 +2173,7 @@ class Database:
                 }
             tag_scores[tid]["weighted_sim"] += sim
             tag_scores[tid]["count"] += 1
-            if sim > tag_scores[tid]["max_sim"]:
-                tag_scores[tid]["max_sim"] = sim
+            tag_scores[tid]["max_sim"] = max(tag_scores[tid]["max_sim"], sim)
 
         suggestions = []
         for tid, data in tag_scores.items():
@@ -2084,14 +2181,15 @@ class Database:
             freq_score = data["weighted_sim"] / total_sim_weight
             confidence = 0.6 * data["max_sim"] + 0.4 * min(1.0, freq_score * 2.5)
             if confidence >= min_score:
-                suggestions.append({
-                    "id": tid,
-                    "name": data["name"],
-                    "score": round(confidence, 2),
-                    "confidence_pct": int(round(confidence * 100)),
-                    "matched_count": data["count"],
-                })
+                suggestions.append(
+                    {
+                        "id": tid,
+                        "name": data["name"],
+                        "score": round(confidence, 2),
+                        "confidence_pct": round(confidence * 100),
+                        "matched_count": data["count"],
+                    }
+                )
 
         suggestions.sort(key=lambda x: x["score"], reverse=True)
         return suggestions
-

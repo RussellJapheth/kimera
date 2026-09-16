@@ -1,15 +1,20 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Russell Japheth
+#
+# This file is part of Kimera. See the LICENSE file for details.
+
 """
 Tests for folder hierarchy view and direct file filtering vs subfolder contents.
 """
 
 from pathlib import Path
-from PIL import Image
-import pytest
-from fastapi.testclient import TestClient
 
+import pytest
 from app.cache import ThumbnailCache
 from app.db import Database
 from app.server import create_app
+from fastapi.testclient import TestClient
+from PIL import Image
 
 
 @pytest.fixture
@@ -17,7 +22,7 @@ def folder_test_env(tmp_path: Path):
     db_file = tmp_path / "test_folders.db"
     cache_dir = tmp_path / "cache"
     db = Database(db_file)
-    cache = ThumbnailCache(cache_dir)
+    ThumbnailCache(cache_dir)
 
     # Structure:
     # tmp_path/
@@ -110,7 +115,7 @@ def test_db_get_images_direct_only(folder_test_env):
 
 def test_folders_view_endpoint(folder_test_env):
     client = folder_test_env["client"]
-    root = folder_test_env["root"]
+    folder_test_env["root"]
     vac_dir = folder_test_env["vac_dir"]
     empty_parent = folder_test_env["empty_parent"]
     sub_empty = folder_test_env["sub_empty"]
@@ -159,4 +164,3 @@ def test_adjacent_modal_navigation_in_folders(folder_test_env):
     # Should navigate within the 2 direct files (vac1, vac2)
     assert "1 / 2" in res_modal.text
     assert f"setNeighbors(null, {ids['vac2']})" in res_modal.text
-

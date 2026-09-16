@@ -1,21 +1,25 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Russell Japheth
+#
+# This file is part of Kimera. See the LICENSE file for details.
+
 """
 Face embedding clustering algorithms using cosine distance.
 """
 
 from __future__ import annotations
 
-from typing import List, Union
 import numpy as np
 from sklearn.cluster import DBSCAN, AgglomerativeClustering
 from sklearn.preprocessing import normalize
 
 
 def cluster_embeddings(
-    embeddings: Union[List[np.ndarray], np.ndarray],
+    embeddings: list[np.ndarray] | np.ndarray,
     eps: float = 0.45,
     min_samples: int = 1,
     algorithm: str = "dbscan",
-) -> List[int]:
+) -> list[int]:
     """
     Cluster face embeddings using cosine distance.
 

@@ -1,8 +1,14 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Russell Japheth
+#
+# This file is part of Kimera. See the LICENSE file for details.
+
 """
 Tests for directory, image, and video keyframe scanning logic.
 """
 
 from pathlib import Path
+
 import cv2
 import numpy as np
 import pytest
@@ -90,12 +96,14 @@ def test_extract_video_keyframes(tmp_path: Path):
 
     out.release()
 
-    keyframes = list(extract_video_keyframes(
-        video_file,
-        scene_threshold=0.3,
-        min_interval_sec=0.2,
-        max_interval_sec=2.0,
-    ))
+    keyframes = list(
+        extract_video_keyframes(
+            video_file,
+            scene_threshold=0.3,
+            min_interval_sec=0.2,
+            max_interval_sec=2.0,
+        )
+    )
 
     # Should detect initial frame (frame 0) and scene cut (frame 30)
     assert len(keyframes) >= 2

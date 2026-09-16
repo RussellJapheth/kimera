@@ -1,19 +1,24 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Russell Japheth
+#
+# This file is part of Kimera. See the LICENSE file for details.
+
 """
 Tests for "Improve Matches" active learning feature.
 Verifies candidate search filtering, distance bounds, 10-cap constraint, and feedback confirmation API.
 """
 
 from pathlib import Path
-import numpy as np
-from PIL import Image
-import pytest
-from fastapi.testclient import TestClient
-from sklearn.preprocessing import normalize
 
+import numpy as np
+import pytest
 from app.cache import ThumbnailCache
 from app.db import Database
 from app.recognition import MultiExemplarMatcher
 from app.server import create_app
+from fastapi.testclient import TestClient
+from PIL import Image
+from sklearn.preprocessing import normalize
 
 
 @pytest.fixture
@@ -21,7 +26,7 @@ def improve_env(tmp_path: Path):
     db_file = tmp_path / "test_improve.db"
     cache_dir = tmp_path / "test_cache"
     db = Database(db_file)
-    cache = ThumbnailCache(cache_dir)
+    ThumbnailCache(cache_dir)
 
     # Base normalized embedding for Person 1 (Alice)
     rng = np.random.RandomState(42)

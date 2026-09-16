@@ -1,3 +1,8 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Russell Japheth
+#
+# This file is part of Kimera. See the LICENSE file for details.
+
 """
 Multi-exemplar face recognition engine for semi-supervised person matching.
 Uses K-Medoids exemplar selection to maintain diverse representations per person
@@ -6,12 +11,13 @@ and fast vectorized cosine distance matching.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any
+
 import numpy as np
 from sklearn.preprocessing import normalize
 
 
-def select_k_medoids(embeddings: np.ndarray | List[np.ndarray], k: int = 5) -> List[np.ndarray]:
+def select_k_medoids(embeddings: np.ndarray | list[np.ndarray], k: int = 5) -> list[np.ndarray]:
     """
     Select up to k diverse, representative medoid embeddings for a person using
     cosine distance diversity (farthest-first traversal + medoid refinement).
@@ -34,7 +40,7 @@ def select_k_medoids(embeddings: np.ndarray | List[np.ndarray], k: int = 5) -> L
     n_samples = len(X_norm)
 
     if n_samples <= k:
-        return [vec for vec in X_norm]
+        return list(X_norm)
 
     # Compute pairwise cosine distance matrix: D[i, j] = 1 - (u . v)
     sim_matrix = np.clip(np.matmul(X_norm, X_norm.T), -1.0, 1.0)
@@ -69,10 +75,29 @@ def select_k_medoids(embeddings: np.ndarray | List[np.ndarray], k: int = 5) -> L
     return [X_norm[idx] for idx in refined_indices]
 
 
+def _find_root(parent: list[int], x: int) -> int:
+    """Return the compressed root of ``x``, path-halving as it walks."""
+    while parent[x] != x:
+        parent[x] = parent[parent[x]]
+        x = parent[x]
+    return x
+
+
+def _union_find(
+    parent: list[int],
+    a: int,
+    b: int,
+) -> None:
+    """Union two indices by rank-compressed path, mutating ``parent`` in place."""
+    ra, rb = _find_root(parent, a), _find_root(parent, b)
+    if ra != rb:
+        parent[rb] = ra
+
+
 def group_intra_video(
-    video_faces: List[Dict[str, Any]],
+    video_faces: list[dict[str, Any]],
     threshold: float = 0.30,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
     Group near-identical faces found within the same video into merge components.
 
@@ -89,11 +114,11 @@ def group_intra_video(
     if not video_faces:
         return []
 
-    by_image: Dict[int, List[Dict[str, Any]]] = {}
+    by_image: dict[int, list[dict[str, Any]]] = {}
     for f in video_faces:
         by_image.setdefault(f["image_id"], []).append(f)
 
-    components: List[Dict[str, Any]] = []
+    components: list[dict[str, Any]] = []
 
     for image_faces in by_image.values():
         if len(image_faces) < 2:
@@ -101,17 +126,6 @@ def group_intra_video(
 
         n = len(image_faces)
         parent = list(range(n))
-
-        def find(x: int) -> int:
-            while parent[x] != x:
-                parent[x] = parent[parent[x]]
-                x = parent[x]
-            return x
-
-        def union(a: int, b: int) -> None:
-            ra, rb = find(a), find(b)
-            if ra != rb:
-                parent[rb] = ra
 
         E = np.asarray([f["embedding"] for f in image_faces], dtype=np.float32)
         if E.ndim == 1:
@@ -123,11 +137,11 @@ def group_intra_video(
         for i in range(n):
             for j in range(i + 1, n):
                 if float(dist_matrix[i, j]) <= threshold:
-                    union(i, j)
+                    _union_find(parent, i, j)
 
-        comps: Dict[int, Dict[str, Any]] = {}
+        comps: dict[int, dict[str, Any]] = {}
         for idx, f in enumerate(image_faces):
-            root = find(idx)
+            root = _find_root(parent, idx)
             if root not in comps:
                 comps[root] = {"persons": {}, "clusters": {}, "noise_ids": []}
             comp = comps[root]
@@ -142,7 +156,7 @@ def group_intra_video(
             else:
                 comp["noise_ids"].append(f["id"])
 
-        for root, comp in comps.items():
+        for comp in comps.values():
             count = len(comp["noise_ids"])
             if count >= 2:
                 components.append(comp)
@@ -156,19 +170,19 @@ class MultiExemplarMatcher:
     Matches unknown query faces against verified person exemplar galleries.
     """
 
-    def __init__(self, person_exemplars: Optional[Dict[int, List[np.ndarray]]] = None):
-        self.person_ids: List[int] = []
-        self.exemplar_matrix: Optional[np.ndarray] = None
+    def __init__(self, person_exemplars: dict[int, list[np.ndarray]] | None = None):
+        self.person_ids: list[int] = []
+        self.exemplar_matrix: np.ndarray | None = None
         self.exemplar_person_map: np.ndarray = np.array([], dtype=np.int64)
         if person_exemplars:
             self.fit(person_exemplars)
 
-    def fit(self, person_exemplars: Dict[int, List[np.ndarray]]) -> None:
+    def fit(self, person_exemplars: dict[int, list[np.ndarray]]) -> None:
         """
         Build normalized exemplar search index from a dictionary of {person_id: [exemplar_vecs]}.
         """
-        all_vecs: List[np.ndarray] = []
-        p_ids: List[int] = []
+        all_vecs: list[np.ndarray] = []
+        p_ids: list[int] = []
 
         for person_id, exemplars in person_exemplars.items():
             for vec in exemplars:
@@ -186,18 +200,19 @@ class MultiExemplarMatcher:
             X = X.reshape(1, -1)
         self.exemplar_matrix = normalize(X, norm="l2", axis=1)
         self.exemplar_person_map = np.asarray(p_ids, dtype=np.int64)
-        self.person_ids = sorted(list(person_exemplars.keys()))
+        self.person_ids = sorted(person_exemplars.keys())
 
     @property
     def is_empty(self) -> bool:
+        """Return True when no exemplar embeddings have been registered."""
         return self.exemplar_matrix is None or len(self.exemplar_matrix) == 0
 
     def match_face(
         self,
         embedding: np.ndarray,
-        exclusions: Optional[Set[int]] = None,
+        exclusions: set[int] | None = None,
         threshold: float = 0.42,
-    ) -> Optional[Tuple[int, float]]:
+    ) -> tuple[int, float] | None:
         """
         Match a single face embedding against all active exemplars.
 
@@ -233,10 +248,10 @@ class MultiExemplarMatcher:
 
     def match_faces_batch(
         self,
-        faces: List[Dict[str, Any]],
-        exclusions: Optional[Dict[int, Set[int]]] = None,
+        faces: list[dict[str, Any]],
+        exclusions: dict[int, set[int]] | None = None,
         threshold: float = 0.42,
-    ) -> Dict[int, Tuple[int, float]]:
+    ) -> dict[int, tuple[int, float]]:
         """
         Match a batch of unassigned face records against exemplars using vectorized operations.
 
@@ -263,7 +278,7 @@ class MultiExemplarMatcher:
         sim_matrix = np.clip(np.matmul(Q_norm, self.exemplar_matrix.T), -1.0, 1.0)
         dist_matrix = 1.0 - sim_matrix
 
-        results: Dict[int, Tuple[int, float]] = {}
+        results: dict[int, tuple[int, float]] = {}
 
         for i, face_id in enumerate(face_ids):
             row_dists = dist_matrix[i].copy()
@@ -284,12 +299,12 @@ class MultiExemplarMatcher:
     def find_uncertain_candidates(
         self,
         person_id: int,
-        faces: List[Dict[str, Any]],
-        exclusions: Optional[Dict[int, Set[int]]] = None,
+        faces: list[dict[str, Any]],
+        exclusions: dict[int, set[int]] | None = None,
         min_dist: float = 0.38,
         max_dist: float = 0.60,
         limit: int = 10,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Find candidate unassigned faces within the uncertainty distance band [min_dist, max_dist]
         for a specific person, sorted by closest match first, capped at limit.
@@ -298,13 +313,13 @@ class MultiExemplarMatcher:
             return []
 
         # Filter exemplars belonging to target person
-        p_mask = (self.exemplar_person_map == int(person_id))
+        p_mask = self.exemplar_person_map == int(person_id)
         if not np.any(p_mask):
             return []
 
         p_exemplars = self.exemplar_matrix[p_mask]
 
-        face_ids = [f["id"] for f in faces]
+        [f["id"] for f in faces]
         embeddings = [f["embedding"] for f in faces]
 
         Q = np.asarray(embeddings, dtype=np.float32)
@@ -315,7 +330,7 @@ class MultiExemplarMatcher:
         sim_matrix = np.clip(np.matmul(Q_norm, p_exemplars.T), -1.0, 1.0)
         dist_matrix = 1.0 - sim_matrix
 
-        candidates: List[Dict[str, Any]] = []
+        candidates: list[dict[str, Any]] = []
 
         for i, f in enumerate(faces):
             face_id = f["id"]
@@ -324,7 +339,7 @@ class MultiExemplarMatcher:
 
             min_dist_val = float(np.min(dist_matrix[i]))
             if min_dist <= min_dist_val <= max_dist:
-                sim_pct = max(0, min(100, int(round((1.0 - min_dist_val) * 100))))
+                sim_pct = max(0, min(100, round((1.0 - min_dist_val) * 100)))
                 cand = dict(f)
                 cand["distance"] = round(min_dist_val, 4)
                 cand["similarity_pct"] = sim_pct
@@ -336,12 +351,12 @@ class MultiExemplarMatcher:
 
     def find_uncertain_candidates_all(
         self,
-        faces: List[Dict[str, Any]],
-        exclusions: Optional[Dict[int, Set[int]]] = None,
+        faces: list[dict[str, Any]],
+        exclusions: dict[int, set[int]] | None = None,
         min_dist: float = 0.38,
         max_dist: float = 0.60,
         limit: int = 10,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Find candidate unassigned faces within uncertainty distance band [min_dist, max_dist]
         across all active person exemplars, sorted by closest match first, capped at limit.
@@ -349,7 +364,7 @@ class MultiExemplarMatcher:
         if not faces or self.is_empty or self.exemplar_matrix is None:
             return []
 
-        face_ids = [f["id"] for f in faces]
+        [f["id"] for f in faces]
         embeddings = [f["embedding"] for f in faces]
 
         Q = np.asarray(embeddings, dtype=np.float32)
@@ -360,7 +375,7 @@ class MultiExemplarMatcher:
         sim_matrix = np.clip(np.matmul(Q_norm, self.exemplar_matrix.T), -1.0, 1.0)
         dist_matrix = 1.0 - sim_matrix
 
-        candidates: List[Dict[str, Any]] = []
+        candidates: list[dict[str, Any]] = []
 
         for i, f in enumerate(faces):
             face_id = f["id"]
@@ -375,7 +390,7 @@ class MultiExemplarMatcher:
 
             if min_dist <= best_dist <= max_dist:
                 matched_person_id = int(self.exemplar_person_map[best_idx])
-                sim_pct = max(0, min(100, int(round((1.0 - best_dist) * 100))))
+                sim_pct = max(0, min(100, round((1.0 - best_dist) * 100)))
                 cand = dict(f)
                 cand["target_person_id"] = matched_person_id
                 cand["distance"] = round(best_dist, 4)

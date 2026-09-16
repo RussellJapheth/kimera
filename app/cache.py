@@ -1,3 +1,8 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Russell Japheth
+#
+# This file is part of Kimera. See the LICENSE file for details.
+
 """
 High-performance thumbnail and face crop cache engine.
 Generates WebP thumbnails for images and videos, plus square face avatar crops with EXIF orientation handling.
@@ -6,12 +11,13 @@ Uses 2-tier directory sharding to support massive libraries without filesystem p
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import io
-from pathlib import Path
 import shutil
 import subprocess
-from typing import List, Optional, Tuple
+from pathlib import Path
+
 import cv2
 import numpy as np
 from PIL import Image, ImageOps
@@ -21,9 +27,12 @@ VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".m4v"}
 
 
 class ThumbnailCache:
-    """Manages disk-cached image/video thumbnails, face avatar crops, and web-transcoded videos with 2-tier directory sharding."""
+    """Manages disk-cached image/video thumbnails, face avatar crops, and transcoded videos.
 
-    def __init__(self, cache_dir: Optional[Path | str] = None):
+    Uses a 2-tier directory sharding scheme to keep any single folder small.
+    """
+
+    def __init__(self, cache_dir: Path | str | None = None):
         self.set_cache_dir(cache_dir or DEFAULT_CACHE_DIR)
 
     def set_cache_dir(self, cache_dir: Path | str) -> None:
@@ -46,7 +55,9 @@ class ThumbnailCache:
         """Calculate number of cached items and disk footprint in bytes across sharded directories."""
         thumb_files = [f for f in self.thumbs_dir.rglob("*.webp") if f.is_file()] if self.thumbs_dir.exists() else []
         face_files = [f for f in self.faces_dir.rglob("*.webp") if f.is_file()] if self.faces_dir.exists() else []
-        transcoded_files = [f for f in self.transcoded_dir.rglob("*.mp4") if f.is_file()] if self.transcoded_dir.exists() else []
+        transcoded_files = (
+            [f for f in self.transcoded_dir.rglob("*.mp4") if f.is_file()] if self.transcoded_dir.exists() else []
+        )
         total_size = sum(f.stat().st_size for f in thumb_files + face_files + transcoded_files)
         return {
             "cache_dir": str(self.cache_dir),
@@ -61,10 +72,8 @@ class ThumbnailCache:
         """Remove all cached thumbnails, face crops, and transcoded videos."""
         for d in (self.thumbs_dir, self.faces_dir, self.transcoded_dir):
             if d.exists():
-                try:
+                with contextlib.suppress(Exception):
                     shutil.rmtree(d)
-                except Exception:
-                    pass
                 d.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
@@ -73,9 +82,10 @@ class ThumbnailCache:
 
     @staticmethod
     def is_video(path: Path | str) -> bool:
+        """Return True if the path has a supported video extension."""
         return Path(path).suffix.lower() in VIDEO_EXTENSIONS
 
-    def get_transcoded_video(self, media_path: str | Path) -> Optional[Path]:
+    def get_transcoded_video(self, media_path: str | Path) -> Path | None:
         """
         Generate or retrieve a browser-compatible H.264+AAC MP4 web stream version of a video.
         Preserves original resolution (scaled only if needed to even dimensions for H.264).
@@ -105,16 +115,25 @@ class ThumbnailCache:
             cmd = [
                 ffmpeg_bin,
                 "-y",
-                "-i", str(src.resolve()),
-                "-c:v", "libx264",
-                "-preset", "veryfast",
-                "-crf", "23",
-                "-pix_fmt", "yuv420p",
-                "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-                "-c:a", "aac",
-                "-b:a", "128k",
-                "-movflags", "+faststart",
-                str(part_path)
+                "-i",
+                str(src.resolve()),
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "23",
+                "-pix_fmt",
+                "yuv420p",
+                "-vf",
+                "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "-movflags",
+                "+faststart",
+                str(part_path),
             ]
             proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=False)
             if proc.returncode == 0 and part_path.exists() and part_path.stat().st_size > 0:
@@ -127,8 +146,11 @@ class ThumbnailCache:
             part_path.unlink(missing_ok=True)
             return None
 
-    def _extract_video_frame(self, src: Path) -> Optional[np.ndarray]:
-        """Extract a representative RGB frame via OpenCV, falling back to ffmpeg for codecs OpenCV cannot decode (e.g. AV1)."""
+    def _extract_video_frame(self, src: Path) -> np.ndarray | None:
+        """Extract a representative RGB frame via OpenCV.
+
+        Falls back to ffmpeg for codecs OpenCV cannot decode (e.g. AV1).
+        """
         try:
             cap = cv2.VideoCapture(str(src))
             if cap.isOpened():
@@ -150,8 +172,19 @@ class ThumbnailCache:
         try:
             proc = subprocess.run(
                 [
-                    ffmpeg_bin, "-y", "-ss", "0.5", "-i", str(src.resolve()),
-                    "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-",
+                    ffmpeg_bin,
+                    "-y",
+                    "-ss",
+                    "0.5",
+                    "-i",
+                    str(src.resolve()),
+                    "-frames:v",
+                    "1",
+                    "-f",
+                    "image2pipe",
+                    "-vcodec",
+                    "png",
+                    "-",
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
@@ -159,19 +192,23 @@ class ThumbnailCache:
             )
             if proc.returncode != 0 or not proc.stdout:
                 return None
-            with Image.open(io.BytesIO(proc.stdout)) as img:
-                img = ImageOps.exif_transpose(img)
-                if img.mode not in ("RGB", "RGBA"):
-                    img = img.convert("RGB")
-                return np.array(img)
+            with Image.open(io.BytesIO(proc.stdout)) as opened:
+                image = ImageOps.exif_transpose(opened)
+                if image.mode not in ("RGB", "RGBA"):
+                    image = image.convert("RGB")
+                return np.array(image)
         except Exception:
             return None
 
-    def _thumbnail_locations(self, src: Path, max_dim: int) -> Tuple[Path, Path, Path]:
+    def _thumbnail_locations(self, src: Path, max_dim: int) -> tuple[Path, Path, Path]:
         """Return (shard_folder, sharded_thumb_path, legacy_thumb_path) for a media file."""
         file_hash = self._path_hash(str(src.resolve()))
         shard_folder = self._shard_dir(self.thumbs_dir, file_hash)
-        return shard_folder, shard_folder / f"{file_hash}_{max_dim}.webp", self.thumbs_dir / f"{file_hash}_{max_dim}.webp"
+        return (
+            shard_folder,
+            shard_folder / f"{file_hash}_{max_dim}.webp",
+            self.thumbs_dir / f"{file_hash}_{max_dim}.webp",
+        )
 
     def has_thumbnail(self, media_path: str | Path, max_dim: int = 480) -> bool:
         """Return True if a cached WebP thumbnail exists for the media file."""
@@ -181,11 +218,11 @@ class ThumbnailCache:
         _, thumb_path, legacy_path = self._thumbnail_locations(src, max_dim)
         return thumb_path.is_file() or legacy_path.is_file()
 
-    def count_missing_thumbnails(self, media_paths: List[Path | str], max_dim: int = 480) -> int:
+    def count_missing_thumbnails(self, media_paths: list[Path | str], max_dim: int = 480) -> int:
         """Count media files that exist on disk but lack a cached thumbnail."""
         return sum(1 for p in media_paths if Path(p).is_file() and not self.has_thumbnail(p, max_dim))
 
-    def get_thumbnail(self, media_path: str | Path, max_dim: int = 480) -> Optional[Path]:
+    def get_thumbnail(self, media_path: str | Path, max_dim: int = 480) -> Path | None:
         """
         Generate or retrieve a cached WebP thumbnail for an image or video file.
         Returns Path to the cached .webp file.
@@ -212,19 +249,20 @@ class ThumbnailCache:
                 img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
                 shard_folder.mkdir(parents=True, exist_ok=True)
                 img.save(thumb_path, format="WEBP", quality=82, method=4)
-                return thumb_path
             except Exception:
                 return None
+            else:
+                return thumb_path
 
         # Standard image
         try:
-            with Image.open(src) as img:
-                img = ImageOps.exif_transpose(img)
-                if img.mode not in ("RGB", "RGBA"):
-                    img = img.convert("RGB")
-                img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+            with Image.open(src) as opened:
+                image = ImageOps.exif_transpose(opened)
+                if image.mode not in ("RGB", "RGBA"):
+                    image = image.convert("RGB")
+                image.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
                 shard_folder.mkdir(parents=True, exist_ok=True)
-                img.save(thumb_path, format="WEBP", quality=82, method=4)
+                image.save(thumb_path, format="WEBP", quality=82, method=4)
                 return thumb_path
         except Exception:
             return None
@@ -234,20 +272,16 @@ class ThumbnailCache:
         src = Path(media_path)
         file_hash = self._path_hash(str(src.resolve()))
         shard_folder = self._shard_dir(self.thumbs_dir, file_hash)
-        
+
         # Check sharded folder
         if shard_folder.exists():
             for thumb in shard_folder.glob(f"{file_hash}_*.webp"):
-                try:
+                with contextlib.suppress(Exception):
                     thumb.unlink(missing_ok=True)
-                except Exception:
-                    pass
         # Check legacy flat folder
         for thumb in self.thumbs_dir.glob(f"{file_hash}_*.webp"):
-            try:
+            with contextlib.suppress(Exception):
                 thumb.unlink(missing_ok=True)
-            except Exception:
-                pass
 
     def invalidate_media_cache(self, media_path: str | Path) -> None:
         """Invalidate all thumbnails and transcoded video streams for a media file."""
@@ -258,16 +292,12 @@ class ThumbnailCache:
         shard_folder = self._shard_dir(self.transcoded_dir, file_hash)
         if shard_folder.exists():
             for vid in shard_folder.glob(f"{file_hash}*.mp4"):
-                try:
+                with contextlib.suppress(Exception):
                     vid.unlink(missing_ok=True)
-                except Exception:
-                    pass
         # Check legacy flat transcoded dir
         for vid in self.transcoded_dir.glob(f"{file_hash}*.mp4"):
-            try:
+            with contextlib.suppress(Exception):
                 vid.unlink(missing_ok=True)
-            except Exception:
-                pass
 
     def _face_shard_dir(self, face_id: int) -> Path:
         """Return 2-tier sharded directory for face crops."""
@@ -278,10 +308,10 @@ class ThumbnailCache:
         self,
         face_id: int,
         img_rgb: np.ndarray,
-        bbox: Tuple[int, int, int, int],
+        bbox: tuple[int, int, int, int],
         size: int = 200,
         margin: float = 0.35,
-    ) -> Optional[Path]:
+    ) -> Path | None:
         """Directly crop and cache face from an in-memory RGB array (e.g. video frame)."""
         shard_folder = self._face_shard_dir(face_id)
         crop_path = shard_folder / f"face_{face_id}_{size}.webp"
@@ -314,18 +344,19 @@ class ThumbnailCache:
             img = img.resize((size, size), Image.Resampling.LANCZOS)
             shard_folder.mkdir(parents=True, exist_ok=True)
             img.save(crop_path, format="WEBP", quality=85, method=4)
-            return crop_path
         except Exception:
             return None
+        else:
+            return crop_path
 
     def get_face_crop(
         self,
         face_id: int,
         image_path: str | Path,
-        bbox: Tuple[int, int, int, int],
+        bbox: tuple[int, int, int, int],
         size: int = 200,
         margin: float = 0.35,
-    ) -> Optional[Path]:
+    ) -> Path | None:
         """
         Generate or retrieve a square face avatar crop with padding margin.
         """
@@ -352,12 +383,12 @@ class ThumbnailCache:
                 return None
 
         try:
-            with Image.open(src) as img:
-                img = ImageOps.exif_transpose(img)
-                if img.mode not in ("RGB", "RGBA"):
-                    img = img.convert("RGB")
+            with Image.open(src) as opened:
+                image = ImageOps.exif_transpose(opened)
+                if image.mode not in ("RGB", "RGBA"):
+                    image = image.convert("RGB")
 
-                w, h = img.size
+                w, h = image.size
                 x1, y1, x2, y2 = bbox
                 bw = x2 - x1
                 bh = y2 - y1
@@ -373,11 +404,11 @@ class ThumbnailCache:
                 crop_x2 = min(w, cx + side)
                 crop_y2 = min(h, cy + side)
 
-                cropped = img.crop((crop_x1, crop_y1, crop_x2, crop_y2))
+                cropped = image.crop((crop_x1, crop_y1, crop_x2, crop_y2))
                 cropped = cropped.resize((size, size), Image.Resampling.LANCZOS)
                 shard_folder.mkdir(parents=True, exist_ok=True)
                 cropped.save(crop_path, format="WEBP", quality=85, method=4)
+                # Return from inside the try so a failed save is still caught by the fallback.
                 return crop_path
         except Exception:
             return None
-

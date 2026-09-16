@@ -1,3 +1,8 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Russell Japheth
+#
+# This file is part of Kimera. See the LICENSE file for details.
+
 """
 Face detection and embedding models using InsightFace (SCRFD + ArcFace) with fallback to OpenCV Zoo (YuNet + SFace).
 """
@@ -5,28 +10,42 @@ Face detection and embedding models using InsightFace (SCRFD + ArcFace) with fal
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
+import logging
 import os
 import threading
 import urllib.request
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, List, NamedTuple, Optional, Tuple
+from typing import Any, NamedTuple
+
 import cv2
 import numpy as np
 from tqdm import tqdm
 
+logger = logging.getLogger(__name__)
+
 # Model URLs
-YUNET_MODEL_URL = "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
-SFACE_MODEL_URL = "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx"
+YUNET_MODEL_URL = (
+    "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
+)
+SFACE_MODEL_URL = (
+    "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx"
+)
 BUFFALO_L_URL = "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip"
 BUFFALO_S_URL = "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_s.zip"
-CLIP_VISION_MODEL_URL = "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/vision_model_quantized.onnx"
+CLIP_VISION_MODEL_URL = (
+    "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/vision_model_quantized.onnx"
+)
 
 DEFAULT_MODEL_DIR = Path.cwd() / ".cache" / "models"
 
 
 class DetectedFace(NamedTuple):
-    bbox: Tuple[int, int, int, int]  # x1, y1, x2, y2
+    """A single detected face: bounding box, confidence, and the raw model output."""
+
+    bbox: tuple[int, int, int, int]  # x1, y1, x2, y2
     confidence: float
     raw_face: Any  # raw face object or keypoints/landmarks
 
@@ -36,7 +55,7 @@ def _download_stream(
     temp_path: Path,
     total_bytes: int,
     description: str,
-    progress_callback: Optional[Callable] = None,
+    progress_callback: Callable | None = None,
 ) -> None:
     req = urllib.request.Request(
         url,
@@ -45,14 +64,17 @@ def _download_stream(
     with urllib.request.urlopen(req, timeout=30) as response:
         chunk_size = 512 * 1024  # 512KB chunks
         downloaded = 0
-        with tqdm(
-            total=total_bytes if total_bytes > 0 else None,
-            unit="B",
-            unit_scale=True,
-            unit_divisor=1024,
-            desc=description,
-            leave=True,
-        ) as pbar, open(temp_path, "wb") as f:
+        with (
+            tqdm(
+                total=total_bytes if total_bytes > 0 else None,
+                unit="B",
+                unit_scale=True,
+                unit_divisor=1024,
+                desc=description,
+                leave=True,
+            ) as pbar,
+            open(temp_path, "wb") as f,
+        ):
             while True:
                 chunk = response.read(chunk_size)
                 if not chunk:
@@ -72,10 +94,8 @@ def _download_stream(
                             total_bytes,
                         )
                     except TypeError:
-                        try:
+                        with contextlib.suppress(Exception):
                             progress_callback(f"{description}: {mb_done:.1f}MB / {mb_total:.1f}MB ({pct}%)")
-                        except Exception:
-                            pass
 
 
 def _download_parallel(
@@ -84,7 +104,7 @@ def _download_parallel(
     total_bytes: int,
     description: str,
     num_threads: int = 8,
-    progress_callback: Optional[Callable] = None,
+    progress_callback: Callable | None = None,
 ) -> bool:
     """Download large files with parallel HTTP Range connections."""
     try:
@@ -121,36 +141,33 @@ def _download_parallel(
                         "Range": f"bytes={start}-{end}",
                     },
                 )
-                with urllib.request.urlopen(req, timeout=45) as resp:
-                    with open(temp_path, "r+b") as f_worker:
-                        curr = start
-                        while curr <= end and not stop_event.is_set():
-                            to_read = min(256 * 1024, end - curr + 1)
-                            chunk = resp.read(to_read)
-                            if not chunk:
-                                break
-                            f_worker.seek(curr)
-                            f_worker.write(chunk)
-                            curr += len(chunk)
-                            with lock:
-                                downloaded[0] += len(chunk)
-                                pbar.update(len(chunk))
-                                if progress_callback:
-                                    pct = int((downloaded[0] / total_bytes) * 100)
-                                    mb_done = downloaded[0] / (1024 * 1024)
-                                    mb_total = total_bytes / (1024 * 1024)
-                                    try:
-                                        progress_callback(
-                                            f"{description}: {mb_done:.1f}MB / {mb_total:.1f}MB ({pct}%)",
-                                            pct,
-                                            downloaded[0],
-                                            total_bytes,
-                                        )
-                                    except TypeError:
-                                        try:
-                                            progress_callback(f"{description}: {mb_done:.1f}MB / {mb_total:.1f}MB ({pct}%)")
-                                        except Exception:
-                                            pass
+                with urllib.request.urlopen(req, timeout=45) as resp, open(temp_path, "r+b") as f_worker:
+                    curr = start
+                    while curr <= end and not stop_event.is_set():
+                        to_read = min(256 * 1024, end - curr + 1)
+                        chunk = resp.read(to_read)
+                        if not chunk:
+                            break
+                        f_worker.seek(curr)
+                        f_worker.write(chunk)
+                        curr += len(chunk)
+                        with lock:
+                            downloaded[0] += len(chunk)
+                            pbar.update(len(chunk))
+                            if progress_callback:
+                                pct = int((downloaded[0] / total_bytes) * 100)
+                                mb_done = downloaded[0] / (1024 * 1024)
+                                mb_total = total_bytes / (1024 * 1024)
+                                try:
+                                    progress_callback(
+                                        f"{description}: {mb_done:.1f}MB / {mb_total:.1f}MB ({pct}%)",
+                                        pct,
+                                        downloaded[0],
+                                        total_bytes,
+                                    )
+                                except TypeError:
+                                    with contextlib.suppress(Exception):
+                                        progress_callback(f"{description}: {mb_done:.1f}MB / {mb_total:.1f}MB ({pct}%)")
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
                 futures = [executor.submit(worker, s, e) for s, e in ranges]
@@ -166,8 +183,8 @@ def _download_parallel(
 def download_file(
     url: str,
     dest_path: Path,
-    desc: Optional[str] = None,
-    progress_callback: Optional[Callable] = None,
+    desc: str | None = None,
+    progress_callback: Callable | None = None,
 ) -> None:
     """Download a model file with high-speed parallel range downloads and progress reporting."""
     dest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -183,11 +200,7 @@ def download_file(
         with urllib.request.urlopen(req, timeout=30) as response:
             total_size_header = response.info().get("Content-Length")
             accept_ranges = response.info().get("Accept-Ranges", "")
-            total_bytes = (
-                int(total_size_header)
-                if total_size_header and total_size_header.isdigit()
-                else 0
-            )
+            total_bytes = int(total_size_header) if total_size_header and total_size_header.isdigit() else 0
 
         success = False
         if total_bytes > 5 * 1024 * 1024 and ("bytes" in accept_ranges.lower() or "github" in url):
@@ -218,8 +231,8 @@ def download_file(
 
 def ensure_buffalo_model(
     model_name: str = "buffalo_l",
-    model_dir: Optional[Path] = None,
-    progress_callback: Optional[Callable] = None,
+    model_dir: Path | None = None,
+    progress_callback: Callable | None = None,
 ) -> Path:
     """Ensure buffalo models are present and return root directory."""
     root_dir = model_dir or (Path.cwd() / ".cache")
@@ -237,10 +250,8 @@ def ensure_buffalo_model(
         zip_path = buffalo_dir / f"{model_name}.zip"
         if not zip_path.exists():
             if progress_callback:
-                try:
+                with contextlib.suppress(Exception):
                     progress_callback(f"Downloading InsightFace {model_name} model pack (~300MB)...", 0, 0, 100)
-                except Exception:
-                    pass
             download_file(
                 url,
                 zip_path,
@@ -249,20 +260,18 @@ def ensure_buffalo_model(
             )
 
         if progress_callback:
-            try:
+            with contextlib.suppress(Exception):
                 progress_callback(f"Extracting {model_name}.zip models...", 98, 98, 100)
-            except Exception:
-                pass
-        print(f"Extracting {zip_path.name} to {buffalo_dir}...")
+        logger.info("Extracting %s to %s...", zip_path.name, buffalo_dir)
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
             zip_ref.extractall(buffalo_dir)
-        print(f"InsightFace {model_name} model ready.")
+        logger.info("InsightFace %s model ready.", model_name)
     return root_dir
 
 
 def ensure_buffalo_s(
-    model_dir: Optional[Path] = None,
-    progress_callback: Optional[Callable] = None,
+    model_dir: Path | None = None,
+    progress_callback: Callable | None = None,
 ) -> Path:
     """Backward compatibility helper."""
     return ensure_buffalo_model("buffalo_s", model_dir, progress_callback=progress_callback)
@@ -275,12 +284,12 @@ class FaceDetector:
 
     def __init__(
         self,
-        model_path: Optional[Path | str] = None,
+        model_path: Path | str | None = None,
         conf_threshold: float = 0.60,
         nms_threshold: float = 0.3,
         engine: str = "auto",  # 'auto', 'insightface', 'yunet'
         model_pack: str = "buffalo_l",
-        progress_callback: Optional[Callable] = None,
+        progress_callback: Callable | None = None,
     ):
         self.conf_threshold = conf_threshold
         self.nms_threshold = nms_threshold
@@ -306,9 +315,9 @@ class FaceDetector:
                 self._app = FaceAnalysis(name=self.model_pack, root=str(root_dir), providers=providers)
                 self._app.prepare(ctx_id=ctx_id, det_size=(640, 640))
                 self.engine = "insightface"
-            except Exception as e:
+            except Exception:
                 if self.engine == "insightface":
-                    raise e
+                    raise
                 self.engine = "yunet"
 
         if self.engine == "yunet":
@@ -332,7 +341,7 @@ class FaceDetector:
                 top_k=5000,
             )
 
-    def detect(self, image_rgb: np.ndarray) -> List[DetectedFace]:
+    def detect(self, image_rgb: np.ndarray) -> list[DetectedFace]:
         """
         Detect faces in an RGB image.
         Returns a list of DetectedFace objects.
@@ -345,7 +354,7 @@ class FaceDetector:
 
         if self.engine == "insightface" and self._app is not None:
             faces = self._app.get(img_bgr)
-            results: List[DetectedFace] = []
+            results: list[DetectedFace] = []
             for face in faces:
                 score = float(face.det_score)
                 if score < self.conf_threshold:
@@ -354,18 +363,20 @@ class FaceDetector:
                 x1, y1, x2, y2 = max(0, bbox[0]), max(0, bbox[1]), min(w, bbox[2]), min(h, bbox[3])
                 if x2 <= x1 or y2 <= y1:
                     continue
-                results.append(DetectedFace(
-                    bbox=(x1, y1, x2, y2),
-                    confidence=score,
-                    raw_face=face,
-                ))
+                results.append(
+                    DetectedFace(
+                        bbox=(x1, y1, x2, y2),
+                        confidence=score,
+                        raw_face=face,
+                    )
+                )
             return results
 
         # Fallback YuNet
         self._detector.setInputSize((w, h))
         _, faces = self._detector.detect(img_bgr)
 
-        results: List[DetectedFace] = []
+        results: list[DetectedFace] = []
         if faces is None or len(faces) == 0:
             return results
 
@@ -375,19 +386,21 @@ class FaceDetector:
                 continue
 
             x, y, bw, bh = face[0:4]
-            x1 = max(0, int(round(x)))
-            y1 = max(0, int(round(y)))
-            x2 = min(w, int(round(x + bw)))
-            y2 = min(h, int(round(y + bh)))
+            x1 = max(0, round(x))
+            y1 = max(0, round(y))
+            x2 = min(w, round(x + bw))
+            y2 = min(h, round(y + bh))
 
             if x2 <= x1 or y2 <= y1:
                 continue
 
-            results.append(DetectedFace(
-                bbox=(x1, y1, x2, y2),
-                confidence=score,
-                raw_face=face,
-            ))
+            results.append(
+                DetectedFace(
+                    bbox=(x1, y1, x2, y2),
+                    confidence=score,
+                    raw_face=face,
+                )
+            )
 
         return results
 
@@ -400,9 +413,9 @@ class FaceEmbedder:
 
     def __init__(
         self,
-        model_path: Optional[Path | str] = None,
+        model_path: Path | str | None = None,
         engine: str = "auto",
-        progress_callback: Optional[Callable] = None,
+        progress_callback: Callable | None = None,
     ):
         self.engine = engine
         self._recognizer = None
@@ -462,8 +475,8 @@ class FaceEmbedder:
 
 
 def ensure_clip_model(
-    model_dir: Optional[Path] = None,
-    progress_callback: Optional[Callable] = None,
+    model_dir: Path | None = None,
+    progress_callback: Callable | None = None,
 ) -> Path:
     """Ensure CLIP quantized ONNX vision model is present and return file path."""
     root_dir = model_dir or (Path.cwd() / ".cache")
@@ -472,10 +485,8 @@ def ensure_clip_model(
     if not dest_path.exists():
         clip_dir.mkdir(parents=True, exist_ok=True)
         if progress_callback:
-            try:
+            with contextlib.suppress(Exception):
                 progress_callback("Downloading CLIP Vision ONNX model (~89MB)...", 0, 0, 100)
-            except Exception:
-                pass
         download_file(
             CLIP_VISION_MODEL_URL,
             dest_path,
@@ -492,7 +503,7 @@ class MediaEmbedder:
     Produces normalized 512-dimensional semantic embeddings.
     """
 
-    def __init__(self, model_path: Optional[Path] = None):
+    def __init__(self, model_path: Path | None = None):
         if model_path is None:
             root_dir = Path.cwd() / ".cache"
             model_path = root_dir / "models" / "clip" / "vision_model_quantized.onnx"
@@ -538,7 +549,7 @@ class MediaEmbedder:
             vec = vec / norm
         return vec.astype(np.float32)
 
-    def embed_video_frames(self, frames_rgb: List[np.ndarray]) -> Optional[np.ndarray]:
+    def embed_video_frames(self, frames_rgb: list[np.ndarray]) -> np.ndarray | None:
         """Embed multiple video keyframes, average them, and L2-normalize."""
         if not frames_rgb:
             return None
@@ -553,11 +564,11 @@ class MediaEmbedder:
 
 
 _media_embedder_lock = threading.Lock()
-_media_embedder: Optional[MediaEmbedder] = None
+_media_embedder: MediaEmbedder | None = None
 _clip_downloading: bool = False
 
 
-def get_media_embedder(auto_download: bool = False) -> Optional[MediaEmbedder]:
+def get_media_embedder(auto_download: bool = False) -> MediaEmbedder | None:
     """Thread-safe accessor for the MediaEmbedder instance."""
     global _media_embedder
     with _media_embedder_lock:
@@ -570,20 +581,20 @@ def get_media_embedder(auto_download: bool = False) -> Optional[MediaEmbedder]:
             ensure_clip_model()
         try:
             _media_embedder = MediaEmbedder(clip_path)
-            return _media_embedder
         except Exception as e:
-            print(f"Warning: Failed to load MediaEmbedder: {e}")
+            logger.warning("Failed to load MediaEmbedder: %s", e)
             return None
+        else:
+            return _media_embedder
 
 
-def trigger_clip_download_async(progress_callback: Optional[Callable] = None) -> None:
+def trigger_clip_download_async(progress_callback: Callable | None = None) -> None:
     """Start background download of CLIP vision model if not already present."""
-    global _clip_downloading
     clip_path = DEFAULT_MODEL_DIR / "clip" / "vision_model_quantized.onnx"
     if clip_path.exists() or _clip_downloading:
         return
 
-    def _bg():
+    def _bg() -> None:
         global _clip_downloading
         _clip_downloading = True
         try:
@@ -591,10 +602,9 @@ def trigger_clip_download_async(progress_callback: Optional[Callable] = None) ->
             # Pre-warm embedder once downloaded
             get_media_embedder(auto_download=False)
         except Exception as e:
-            print(f"Background CLIP model download notice: {e}")
+            logger.warning("Background CLIP model download notice: %s", e)
         finally:
             _clip_downloading = False
 
     t = threading.Thread(target=_bg, daemon=True)
     t.start()
-

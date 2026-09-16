@@ -1,0 +1,64 @@
+[project]
+name = "kimera"
+version = "1.0.0"
+description = "Offline, self-hosted media gallery with state-of-the-art face recognition and clustering."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "AGPL-3.0" }
+authors = [{ name = "Russell Japheth", email = "license@riveady.com.ng" }]
+dependencies = []
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "S",    # flake8-bandit
+    "C4",   # flake8-comprehensions
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific
+    "BLE",  # flake8-blind-except
+    "TRY",  # flake8-tryceratops
+    "PL",   # pylint
+]
+ignore = [
+    "PLC0415",  # lazy imports: avoid heavy/circular imports at module load (cv2, uvicorn, insightface)
+    "PLR0911",  # too many return statements (SQL-heavy helpers)
+    "PLR0912",  # too many branches (clustering/pipeline multimodal code)
+    "PLR0913",  # too many arguments (API route signatures)
+    "PLR0915",  # too many statements (SQL-heavy helpers)
+    "PLR0917",  # too many positional arguments (API route signatures)
+    "PLR2004",  # magic values in threshold comparisons
+    "TRY003",   # long messages in raise statements are fine at call sites
+    "S603",     # subprocess usage in CLI/launcher context
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S110", "BLE001"]
+"app/cache.py" = [
+    "BLE001",  # thumbnail/decode fallbacks: best effort, any failure returns None
+    "S110",     # silent except in refresh/decode helpers
+]
+"app/scanner.py" = [
+    "BLE001",  # media probe/decode fallbacks: best effort type-agnostic probing
+    "S110",     # silent except in refresh/decode helpers
+]
+"app/models.py" = [
+    "BLE001",   # model download/embedder fallbacks: degrade gracefully offline
+    "S310",     # urllib downloads; URLs are fixed HTTPS constants (GitHub/HuggingFace)
+    "PLW0602",  # lazy thread-safe singletons guarded by _media_embedder_lock
+    "PLW0603",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false

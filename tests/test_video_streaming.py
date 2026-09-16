@@ -1,13 +1,18 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Russell Japheth
+#
+# This file is part of Kimera. See the LICENSE file for details.
+
+from pathlib import Path
+
 import cv2
 import numpy as np
-from pathlib import Path
-from PIL import Image
 import pytest
-from fastapi.testclient import TestClient
-
 from app.cache import ThumbnailCache
 from app.db import Database
 from app.server import create_app
+from fastapi.testclient import TestClient
+from PIL import Image
 
 
 @pytest.fixture

@@ -1,3 +1,8 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Russell Japheth
+#
+# This file is part of Kimera. See the LICENSE file for details.
+
 """
 Command Line Interface for the offline face clustering tool and web gallery server.
 """
@@ -7,6 +12,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+
 from tabulate import tabulate
 
 from app.db import Database
@@ -28,16 +34,8 @@ def print_summary(stats: dict) -> None:
     if stats.get("clusters"):
         table_data = []
         for c in stats["clusters"]:
-            table_data.append([
-                f"Cluster {c['cluster_id']}",
-                c["faces_count"],
-                c["images_count"]
-            ])
-        print(tabulate(
-            table_data,
-            headers=["Person / Cluster ID", "Faces Count", "Images Count"],
-            tablefmt="simple"
-        ))
+            table_data.append([f"Cluster {c['cluster_id']}", c["faces_count"], c["images_count"]])
+        print(tabulate(table_data, headers=["Person / Cluster ID", "Faces Count", "Images Count"], tablefmt="simple"))
     else:
         print("  No face clusters formed.")
     print("=" * 55 + "\n")
@@ -66,7 +64,10 @@ def inspect_cluster_cmd(db_path: str, cluster_id: int) -> None:
     print("  Face Bounding Boxes:")
     for face in res["faces"]:
         bbox = face["bbox"]
-        print(f"    [Face #{face['face_id']}] Conf: {face['confidence']:.2f} | BBox: ({bbox[0]}, {bbox[1]}, {bbox[2]}, {bbox[3]}) -> {Path(face['file_path']).name}")
+        print(
+            f"    [Face #{face['face_id']}] Conf: {face['confidence']:.2f} | "
+            f"BBox: ({bbox[0]}, {bbox[1]}, {bbox[2]}, {bbox[3]}) -> {Path(face['file_path']).name}"
+        )
     print("=" * 60 + "\n")
 
 
@@ -79,6 +80,7 @@ def serve_cmd(
 ) -> None:
     """Run the web media gallery server."""
     import uvicorn
+
     from app.server import create_app
 
     if media_dir and (rescan or not Path(db_path).exists()):
@@ -87,17 +89,17 @@ def serve_cmd(
         print_summary(stats)
 
     app = create_app(db_path=db_path)
-    print(f"\n=======================================================")
+    print("\n=======================================================")
     print(f"  ✨ Kimera Media Gallery running at: http://{host}:{port}")
     print(f"  Database: {db_path}")
-    print(f"=======================================================\n")
+    print("=======================================================\n")
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 
 def main(args: list[str] | None = None) -> int:
+    """Parse CLI arguments and dispatch to the selected subcommand."""
     parser = argparse.ArgumentParser(
-        prog="python -m app",
-        description="Kimera: Offline Media Gallery & Face Clustering Tool"
+        prog="python -m app", description="Kimera: Offline Media Gallery & Face Clustering Tool"
     )
 
     subparsers = parser.add_subparsers(dest="subcommand", help="Subcommands")
@@ -113,28 +115,56 @@ def main(args: list[str] | None = None) -> int:
     # Scan subcommand
     scan_parser = subparsers.add_parser("scan", help="Scan a directory, detect faces, and cluster them")
     scan_parser.add_argument("path", type=str, help="Directory path containing photos")
-    scan_parser.add_argument("--db", type=str, default="face_clusters.db", help="SQLite database path (default: face_clusters.db)")
-    scan_parser.add_argument("--threshold", type=float, default=0.43, help="Cosine distance threshold for clustering (default: 0.43)")
-    scan_parser.add_argument("--conf", type=float, default=0.60, help="Face detection confidence threshold (default: 0.60)")
-    scan_parser.add_argument("--algo", type=str, default="agglomerative", choices=["dbscan", "agglomerative"], help="Clustering algorithm")
-    scan_parser.add_argument("--export", type=str, default=None, help="Directory to export cropped face cutouts grouped by person")
-    scan_parser.add_argument("--scene-thresh", type=float, default=0.35, help="Video scene cut threshold (0.0 - 1.0, default: 0.35)")
-    scan_parser.add_argument("--min-interval", type=float, default=60.0, help="Minimum seconds between video keyframes (default: 60.0)")
-    scan_parser.add_argument("--max-interval", type=float, default=90.0, help="Maximum seconds between video keyframe samples (default: 90.0)")
-    scan_parser.add_argument("--no-cluster-refs", action="store_true", help="Do not use unnamed clusters as matching references")
-    scan_parser.add_argument("--intra-merge-threshold", type=float, default=None, help="Cosine distance for intra-video face merge (lower = stricter, default: 0.30)")
+    scan_parser.add_argument(
+        "--db", type=str, default="face_clusters.db", help="SQLite database path (default: face_clusters.db)"
+    )
+    scan_parser.add_argument(
+        "--threshold", type=float, default=0.43, help="Cosine distance threshold for clustering (default: 0.43)"
+    )
+    scan_parser.add_argument(
+        "--conf", type=float, default=0.60, help="Face detection confidence threshold (default: 0.60)"
+    )
+    scan_parser.add_argument(
+        "--algo", type=str, default="agglomerative", choices=["dbscan", "agglomerative"], help="Clustering algorithm"
+    )
+    scan_parser.add_argument(
+        "--export", type=str, default=None, help="Directory to export cropped face cutouts grouped by person"
+    )
+    scan_parser.add_argument(
+        "--scene-thresh", type=float, default=0.35, help="Video scene cut threshold (0.0 - 1.0, default: 0.35)"
+    )
+    scan_parser.add_argument(
+        "--min-interval", type=float, default=60.0, help="Minimum seconds between video keyframes (default: 60.0)"
+    )
+    scan_parser.add_argument(
+        "--max-interval",
+        type=float,
+        default=90.0,
+        help="Maximum seconds between video keyframe samples (default: 90.0)",
+    )
+    scan_parser.add_argument(
+        "--no-cluster-refs", action="store_true", help="Do not use unnamed clusters as matching references"
+    )
+    scan_parser.add_argument(
+        "--intra-merge-threshold",
+        type=float,
+        default=None,
+        help="Cosine distance for intra-video face merge (lower = stricter, default: 0.30)",
+    )
 
     # Inspect subcommand
     inspect_parser = subparsers.add_parser("inspect", help="Inspect a specific person/cluster")
     inspect_parser.add_argument("cluster_id", type=int, help="Cluster ID to inspect")
-    inspect_parser.add_argument("--db", type=str, default="face_clusters.db", help="SQLite database path (default: face_clusters.db)")
+    inspect_parser.add_argument(
+        "--db", type=str, default="face_clusters.db", help="SQLite database path (default: face_clusters.db)"
+    )
 
     if args is None:
         args = sys.argv[1:]
 
     # If first argument is a valid directory or path not matching subcommands, treat as scan command
     if args and args[0] not in ("scan", "inspect", "serve", "-h", "--help"):
-        args = ["scan"] + args
+        args = ["scan", *args]
 
     parsed = parser.parse_args(args)
 

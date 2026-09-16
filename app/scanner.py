@@ -1,3 +1,8 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Russell Japheth
+#
+# This file is part of Kimera. See the LICENSE file for details.
+
 """
 Media scanning, loading, and video keyframe extraction utilities.
 """
@@ -6,8 +11,10 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Generator
 from pathlib import Path
-from typing import Generator, List, NamedTuple, Optional
+from typing import NamedTuple
+
 import cv2
 import numpy as np
 from PIL import Image, ImageOps
@@ -44,6 +51,8 @@ def compute_quick_hash(path: Path | str, chunk_size: int = 65536) -> str:
 
 
 class VideoKeyframe(NamedTuple):
+    """A sampled video frame with its position and scene-cut marker."""
+
     frame_idx: int
     timestamp_sec: float
     frame_rgb: np.ndarray
@@ -71,10 +80,11 @@ def get_video_duration(video_path: Path | str) -> float:
         fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
         frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0
         cap.release()
+    except Exception:
+        return 0.0
+    else:
         if fps > 0 and frame_count > 0:
             return float(frame_count / fps)
-        return 0.0
-    except Exception:
         return 0.0
 
 
@@ -83,7 +93,7 @@ def is_media_file(path: Path | str) -> bool:
     return Path(path).suffix.lower() in SUPPORTED_EXTENSIONS
 
 
-def scan_media_paths(directory_or_file: Path | str) -> List[Path]:
+def scan_media_paths(directory_or_file: Path | str) -> list[Path]:
     """
     Recursively scan a directory or return a single media file.
     Supports images and videos.
@@ -97,7 +107,7 @@ def scan_media_paths(directory_or_file: Path | str) -> List[Path]:
             return [path]
         raise ValueError(f"File format not supported: {path.name}")
 
-    media_paths: List[Path] = []
+    media_paths: list[Path] = []
     for current_root, _, files in os.walk(path):
         for file in sorted(files):
             file_path = Path(current_root) / file
@@ -110,17 +120,17 @@ def scan_media_paths(directory_or_file: Path | str) -> List[Path]:
 scan_image_paths = scan_media_paths
 
 
-def load_image_rgb(image_path: Path | str) -> Optional[np.ndarray]:
+def load_image_rgb(image_path: Path | str) -> np.ndarray | None:
     """
     Load an image from disk as an RGB numpy array (H, W, 3),
     correcting for EXIF orientation if present.
     """
     path = Path(image_path)
     try:
-        with Image.open(path) as img:
-            img = ImageOps.exif_transpose(img)
-            img = img.convert("RGB")
-            return np.array(img, dtype=np.uint8)
+        with Image.open(path) as opened:
+            image = ImageOps.exif_transpose(opened)
+            image = image.convert("RGB")
+            return np.array(image, dtype=np.uint8)
     except Exception:
         return None
 
@@ -155,7 +165,7 @@ def extract_video_keyframes(
     min_frame_interval = max(1, int(fps * min_interval_sec))
     max_frame_interval = max(1, int(fps * max_interval_sec))
 
-    prev_hist: Optional[np.ndarray] = None
+    prev_hist: np.ndarray | None = None
     last_keyframe_idx = -max_frame_interval
     frame_idx = 0
 
@@ -199,9 +209,7 @@ def extract_video_keyframes(
             is_scene_cut = diff >= scene_threshold
             should_sample = False
 
-            if is_scene_cut and frames_since_last >= min_frame_interval:
-                should_sample = True
-            elif frames_since_last >= max_frame_interval:
+            if (is_scene_cut and frames_since_last >= min_frame_interval) or frames_since_last >= max_frame_interval:
                 should_sample = True
 
             if should_sample:

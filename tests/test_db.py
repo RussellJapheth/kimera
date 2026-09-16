@@ -1,8 +1,14 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Russell Japheth
+#
+# This file is part of Kimera. See the LICENSE file for details.
+
 """
 Tests for the SQLite database layer.
 """
 
 from pathlib import Path
+
 import numpy as np
 import pytest
 from app.db import Database
@@ -112,7 +118,7 @@ def test_get_image_includes_tags(temp_db: Database):
 def test_tag_filters_images(temp_db: Database):
     img1 = temp_db.insert_image("/path/to/a.jpg")
     img2 = temp_db.insert_image("/path/to/b.jpg")
-    img3 = temp_db.insert_image("/path/to/c.jpg")
+    temp_db.insert_image("/path/to/c.jpg")
     temp_db.add_tags_to_image(img1, ["Trip"])
     temp_db.add_tags_to_image(img2, ["Trip"])
 

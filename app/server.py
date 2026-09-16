@@ -1,3 +1,8 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Russell Japheth
+#
+# This file is part of Kimera. See the LICENSE file for details.
+
 """
 FastAPI web server for the Kimera Media Gallery.
 Provides HTMX-driven HTML views, REST APIs, and cached thumbnail/crop streaming.
@@ -5,14 +10,15 @@ Provides HTMX-driven HTML views, REST APIs, and cached thumbnail/crop streaming.
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import mimetypes
-import os
-import re
 import shutil
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
-from fastapi import Body, FastAPI, Form, HTTPException, Query, Request, Response
+from typing import Any
+
+from fastapi import FastAPI, Form, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -27,11 +33,13 @@ APP_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = APP_DIR / "templates"
 STATIC_DIR = APP_DIR / "static"
 
+logger = logging.getLogger(__name__)
+
 
 class ScanManager:
     """Manages background scanning & progress reporting."""
 
-    def __init__(self, db_path: str = "face_clusters.db", cache_dir: Optional[str] = None):
+    def __init__(self, db_path: str = "face_clusters.db", cache_dir: str | None = None):
         self.db_path = db_path
         self.cache_dir = cache_dir
         self.is_running = False
@@ -40,9 +48,9 @@ class ScanManager:
         self.percent = 0
         self.current_count = 0
         self.total_count = 0
-        self.logs: List[str] = []
-        self.stats: Dict[str, Any] = {}
-        self.error: Optional[str] = None
+        self.logs: list[str] = []
+        self.stats: dict[str, Any] = {}
+        self.error: str | None = None
         self._lock = threading.Lock()
 
     def start_scan(
@@ -53,10 +61,11 @@ class ScanManager:
         min_samples: int = 1,
         algorithm: str = "agglomerative",
         min_interval_sec: float = 60.0,
-        match_threshold: Optional[float] = None,
-        include_cluster_references: Optional[bool] = None,
-        intra_video_merge_threshold: Optional[float] = None,
+        match_threshold: float | None = None,
+        include_cluster_references: bool | None = None,
+        intra_video_merge_threshold: float | None = None,
     ) -> bool:
+        """Start a background scan/cluster job. Returns False if one is already running."""
         with self._lock:
             if self.is_running:
                 return False
@@ -72,7 +81,17 @@ class ScanManager:
 
         thread = threading.Thread(
             target=self._run_scan_thread,
-            args=(input_dir, conf_threshold, eps, min_samples, algorithm, min_interval_sec, match_threshold, include_cluster_references, intra_video_merge_threshold),
+            args=(
+                input_dir,
+                conf_threshold,
+                eps,
+                min_samples,
+                algorithm,
+                min_interval_sec,
+                match_threshold,
+                include_cluster_references,
+                intra_video_merge_threshold,
+            ),
             daemon=True,
         )
         thread.start()
@@ -97,11 +116,12 @@ class ScanManager:
         min_samples: int,
         algorithm: str,
         min_interval_sec: float = 30.0,
-        match_threshold: Optional[float] = None,
-        include_cluster_references: Optional[bool] = None,
-        intra_video_merge_threshold: Optional[float] = None,
+        match_threshold: float | None = None,
+        include_cluster_references: bool | None = None,
+        intra_video_merge_threshold: float | None = None,
     ) -> None:
         from app.pipeline import run_pipeline
+
         try:
             stats = run_pipeline(
                 input_dir=input_dir,
@@ -127,7 +147,9 @@ class ScanManager:
                 )
                 self.stats = stats
                 self.logs.append("Scan pipeline finished successfully.")
+        # Background worker: capture any failure into status instead of killing the thread.
         except Exception as e:
+            logger.exception("Scan pipeline failed")
             with self._lock:
                 self.is_running = False
                 self.status = "error"
@@ -147,10 +169,11 @@ class EmbeddingManager:
         self.percent = 0
         self.current_count = 0
         self.total_count = 0
-        self.error: Optional[str] = None
+        self.error: str | None = None
         self._lock = threading.Lock()
 
     def start_indexing(self) -> bool:
+        """Start background embedding indexing. Returns False if already running."""
         with self._lock:
             if self.is_running:
                 return False
@@ -173,6 +196,7 @@ class EmbeddingManager:
 
     def _run_thread(self) -> None:
         from app.pipeline import index_missing_media_embeddings
+
         try:
             db = Database(self.db_path)
             indexed = index_missing_media_embeddings(db, progress_callback=self._on_progress)
@@ -181,7 +205,9 @@ class EmbeddingManager:
                 self.status = "completed"
                 self.percent = 100
                 self.progress_message = f"Indexed {indexed} visual embeddings successfully."
+        # Background worker: capture any failure into status instead of killing the thread.
         except Exception as e:
+            logger.exception("Embedding indexing failed")
             with self._lock:
                 self.is_running = False
                 self.status = "error"
@@ -192,7 +218,7 @@ class EmbeddingManager:
 class ThumbnailManager:
     """Regenerates cached thumbnails for indexed media that are missing one. Only missing files are processed."""
 
-    def __init__(self, db_path: str = "face_clusters.db", cache_dir: Optional[str] = None):
+    def __init__(self, db_path: str = "face_clusters.db", cache_dir: str | None = None):
         self.db_path = db_path
         self.cache_dir = cache_dir
         self.is_running = False
@@ -201,11 +227,12 @@ class ThumbnailManager:
         self.percent = 0
         self.current_count = 0
         self.total_count = 0
-        self.error: Optional[str] = None
-        self.stats: Dict[str, Any] = {}
+        self.error: str | None = None
+        self.stats: dict[str, Any] = {}
         self._lock = threading.Lock()
 
     def start_generation(self) -> bool:
+        """Start background thumbnail regeneration. Returns False if already running."""
         with self._lock:
             if self.is_running:
                 return False
@@ -244,7 +271,9 @@ class ThumbnailManager:
                 if (i + 1) % 100 == 0 or i + 1 == total:
                     self._on_progress(
                         f"Checked {i + 1}/{total} media files for missing thumbnails...",
-                        int((i + 1) / max(1, total) * 100), i + 1, total,
+                        int((i + 1) / max(1, total) * 100),
+                        i + 1,
+                        total,
                     )
 
             missing_total = len(missing)
@@ -273,7 +302,9 @@ class ThumbnailManager:
                 if (i + 1) % 10 == 0 or i + 1 == missing_total:
                     self._on_progress(
                         f"Generated {generated} of {missing_total} missing thumbnails...",
-                        int((i + 1) / max(1, missing_total) * 100), i + 1, missing_total,
+                        int((i + 1) / max(1, missing_total) * 100),
+                        i + 1,
+                        missing_total,
                     )
 
             with self._lock:
@@ -290,7 +321,9 @@ class ThumbnailManager:
                     f"Thumbnail regeneration complete: {generated} generated, "
                     f"{failed} failed, {missing_total - generated - failed} already cached."
                 )
+        # Background worker: capture any failure into status instead of killing the thread.
         except Exception as e:
+            logger.exception("Thumbnail regeneration failed")
             with self._lock:
                 self.is_running = False
                 self.status = "error"
@@ -299,41 +332,53 @@ class ThumbnailManager:
 
 
 class DeleteFilesRequest(BaseModel):
-    image_ids: List[int]
+    """Request body for deleting one or more media items."""
+
+    image_ids: list[int]
 
 
 class RenameFileRequest(BaseModel):
+    """Request body for renaming a single media file."""
+
     image_id: int
     new_name: str
 
 
 class BatchRenameRequest(BaseModel):
-    image_ids: List[int]
+    """Request body for batch-renaming media files."""
+
+    image_ids: list[int]
     mode: str = "prefix"  # prefix, suffix, replace, pattern
-    prefix: Optional[str] = ""
-    suffix: Optional[str] = ""
-    find_text: Optional[str] = ""
-    replace_text: Optional[str] = ""
-    pattern: Optional[str] = ""
+    prefix: str | None = ""
+    suffix: str | None = ""
+    find_text: str | None = ""
+    replace_text: str | None = ""
+    pattern: str | None = ""
     start_index: int = 1
 
 
 class MoveFilesRequest(BaseModel):
-    image_ids: List[int]
+    """Request body for moving media files to another folder."""
+
+    image_ids: list[int]
     destination_folder: str
 
 
 class CopyFilesRequest(BaseModel):
-    image_ids: List[int]
-    destination_folder: Optional[str] = None
+    """Request body for copying media files to another folder."""
+
+    image_ids: list[int]
+    destination_folder: str | None = None
 
 
 class BatchFavoriteRequest(BaseModel):
-    image_ids: List[int]
+    """Request body for marking media items as favorite (or not)."""
+
+    image_ids: list[int]
     is_favorite: bool = True
 
 
-def _parse_image_ids(raw_ids: Any) -> List[int]:
+def _parse_image_ids(raw_ids: Any) -> list[int]:
     """Extract list of integer image IDs from list, string, or int input."""
     if isinstance(raw_ids, list):
         out = []
@@ -365,7 +410,7 @@ def _get_unique_destination_path(target_dir: Path, filename: str) -> Path:
         counter += 1
 
 
-def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = None) -> FastAPI:
+def create_app(db_path: str = "face_clusters.db", cache_dir: str | None = None) -> FastAPI:
     """Factory to create and configure the FastAPI application."""
     app = FastAPI(title="Kimera Media Gallery")
 
@@ -377,7 +422,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
     embedding_mgr = EmbeddingManager(db_path)
     thumbnail_mgr = ThumbnailManager(db_path, cache_dir=resolved_cache_dir)
 
-    def _media_source_root() -> Optional[Path]:
+    def _media_source_root() -> Path | None:
         input_dir = db.get_setting("input_dir")
         if input_dir and Path(input_dir).exists():
             return Path(input_dir).resolve()
@@ -394,6 +439,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
 
     # On server start/restart: trigger background download of CLIP vision model if missing
     from app.models import trigger_clip_download_async
+
     trigger_clip_download_async()
 
     # Mount static assets
@@ -403,13 +449,13 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
     async def gallery_view(
         request: Request,
         filter: str = Query("all", alias="filter"),
-        search: Optional[str] = Query(None),
-        person_id: Optional[int] = Query(None),
-        cluster_id: Optional[int] = Query(None),
-        tag_id: Optional[int] = Query(None),
-        folder_path: Optional[str] = Query(None),
-        similar_to: Optional[int] = Query(None),
-        threshold: Optional[float] = Query(None),
+        search: str | None = Query(None),
+        person_id: int | None = Query(None),
+        cluster_id: int | None = Query(None),
+        tag_id: int | None = Query(None),
+        folder_path: str | None = Query(None),
+        similar_to: int | None = Query(None),
+        threshold: float | None = Query(None),
         sort_by: str = Query("date", alias="sort"),
         sort_order: str = Query("desc", alias="order"),
         page: int = Query(1, ge=1),
@@ -454,7 +500,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         active_tab = "favorites" if filter == "favorites" else "photos"
         all_tags = db.get_all_tags()
         active_tag = db.get_tag(tag_id) if tag_id is not None else None
-        
+
         # If cluster_id is specified, fetch cluster info for top rename banner
         cluster_info = None
         if cluster_id is not None:
@@ -524,7 +570,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
     @app.get("/folders", response_class=HTMLResponse)
     async def folders_view(
         request: Request,
-        path: Optional[str] = Query(None),
+        path: str | None = Query(None),
         sort_by: str = Query("date", alias="sort"),
         sort_order: str = Query("desc", alias="order"),
         page: int = Query(1, ge=1),
@@ -532,7 +578,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
     ):
         folders_data = db.get_folders(current_folder=path)
         cur_folder = folders_data["current_folder"]
-        
+
         # Load images directly in current folder
         exclude_duplicates = db.get_setting("exclude_duplicates") == "1"
         images_data = db.get_images(
@@ -547,6 +593,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
 
         if request.headers.get("HX-Request") and infinite == 1:
             from urllib.parse import quote_plus
+
             return templates.TemplateResponse(
                 request=request,
                 name="partials/photo_batch.html",
@@ -579,7 +626,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         )
 
     @app.get("/people", response_class=HTMLResponse)
-    async def people_view(request: Request, search: Optional[str] = Query(None)):
+    async def people_view(request: Request, search: str | None = Query(None)):
         saved_settings = db.get_all_settings()
         hide_low_quality = saved_settings.get("hide_low_quality_faces") == "1"
         people = db.get_people(search=search, hide_low_quality=hide_low_quality)
@@ -654,12 +701,16 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
     async def settings_view(request: Request):
         stats = db.get_summary_stats()
         saved_settings = db.get_all_settings()
-        default_dir = saved_settings.get("input_dir") or (str(Path("pictures").resolve()) if Path("pictures").exists() else str(Path.cwd()))
+        default_dir = saved_settings.get("input_dir") or (
+            str(Path("pictures").resolve()) if Path("pictures").exists() else str(Path.cwd())
+        )
         cache_stats = cache.get_cache_stats()
         embedding_stats = db.get_media_embedding_stats()
         try:
             missing_thumb_count = cache.count_missing_thumbnails(db.get_all_media_paths(), max_dim=480)
+        # Dashboard must render even if the count fails.
         except Exception:
+            logger.debug("Could not count missing thumbnails", exc_info=True)
             missing_thumb_count = 0
         return templates.TemplateResponse(
             request=request,
@@ -725,6 +776,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         try:
             return {"suggested_tags": db.suggest_tags_for_image(image_id, top_k=8, min_score=0.50)}
         except Exception as e:
+            logger.warning("suggest_tags failed for image %s", image_id, exc_info=True)
             return {"suggested_tags": [], "error": str(e)}
 
     @app.post("/api/settings/save", response_class=HTMLResponse)
@@ -742,21 +794,30 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         include_cluster_references: str = Form(""),
         intra_video_merge_threshold: float = Form(0.30),
     ):
-        db.set_settings({
-            "input_dir": input_dir,
-            "conf_threshold": str(conf_threshold),
-            "eps": str(eps),
-            "min_samples": str(min_samples),
-            "algorithm": algorithm,
-            "min_interval_sec": str(min_interval_sec),
-            "recognition_match_threshold": str(recognition_match_threshold),
-            "similarity_threshold": str(similarity_threshold),
-            "hide_low_quality_faces": "1" if str(hide_low_quality_faces).lower() in ("1", "true", "on", "yes") else "",
-            "include_cluster_references": "1" if str(include_cluster_references).lower() in ("1", "true", "on", "yes") else "",
-            "intra_video_merge_threshold": str(intra_video_merge_threshold),
-        })
+        db.set_settings(
+            {
+                "input_dir": input_dir,
+                "conf_threshold": str(conf_threshold),
+                "eps": str(eps),
+                "min_samples": str(min_samples),
+                "algorithm": algorithm,
+                "min_interval_sec": str(min_interval_sec),
+                "recognition_match_threshold": str(recognition_match_threshold),
+                "similarity_threshold": str(similarity_threshold),
+                "hide_low_quality_faces": "1"
+                if str(hide_low_quality_faces).lower() in ("1", "true", "on", "yes")
+                else "",
+                "include_cluster_references": "1"
+                if str(include_cluster_references).lower() in ("1", "true", "on", "yes")
+                else "",
+                "intra_video_merge_threshold": str(intra_video_merge_threshold),
+            }
+        )
         return HTMLResponse("""
-            <div class="alert alert-success" style="background: rgba(16, 185, 129, 0.15); border: 1px solid #10b981; color: #6ee7b7; padding: 0.6rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.875rem;">
+            <div class="alert alert-success"
+                     style="background: rgba(16, 185, 129, 0.15); border: 1px solid #10b981; color: #6ee7b7;
+                            padding: 0.6rem 1rem; border-radius: 8px; margin-bottom: 1rem;
+                            font-size: 0.875rem;">
                 ✓ Settings saved successfully!
             </div>
         """)
@@ -768,8 +829,12 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         scan_mgr.cache_dir = str(new_path)
         cache_stats = cache.get_cache_stats()
         return HTMLResponse(f"""
-            <div class="alert alert-success" style="background: rgba(16, 185, 129, 0.15); border: 1px solid #10b981; color: #6ee7b7; padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem;">
-                ✓ Cache directory updated to: <code>{new_path}</code> ({cache_stats['thumbnail_count']} thumbnails, {cache_stats['face_count']} faces, {cache_stats['total_size_mb']} MB)
+            <div class="alert alert-success"
+                     style="background: rgba(16, 185, 129, 0.15); border: 1px solid #10b981; color: #6ee7b7;
+                            padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem;">
+                ✓ Cache directory updated to: <code>{new_path}</code>
+                ({cache_stats["thumbnail_count"]} thumbnails,
+                {cache_stats["face_count"]} faces, {cache_stats["total_size_mb"]} MB)
             </div>
         """)
 
@@ -778,8 +843,11 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         cache.clear_cache()
         cache_stats = cache.get_cache_stats()
         return HTMLResponse(f"""
-            <div class="alert alert-success" style="background: rgba(16, 185, 129, 0.15); border: 1px solid #10b981; color: #6ee7b7; padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem;">
-                ✓ Cache cleared! {cache_stats['thumbnail_count']} thumbnails, {cache_stats['total_size_mb']} MB remaining.
+            <div class="alert alert-success"
+                     style="background: rgba(16, 185, 129, 0.15); border: 1px solid #10b981; color: #6ee7b7;
+                            padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem;">
+                ✓ Cache cleared! {cache_stats["thumbnail_count"]} thumbnails,
+                {cache_stats["total_size_mb"]} MB remaining.
             </div>
         """)
 
@@ -790,15 +858,21 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         checked = "checked" if enabled else ""
         return HTMLResponse(f"""
         <div id="exclude-duplicates-control">
-          <div class="alert alert-success" style="background: rgba(16, 185, 129, 0.15); border: 1px solid #10b981; color: #6ee7b7; padding: 0.5rem 0.85rem; border-radius: 8px; margin-bottom: 0.85rem; font-size: 0.8125rem;">
+          <div class="alert alert-success"
+                 style="background: rgba(16, 185, 129, 0.15); border: 1px solid #10b981; color: #6ee7b7;
+                        padding: 0.5rem 0.85rem; border-radius: 8px; margin-bottom: 0.85rem;
+                        font-size: 0.8125rem;">
             ✓ Exclude duplicates {"enabled" if enabled else "disabled"}. Open the gallery to apply.
           </div>
           <form hx-post="/api/settings/exclude-duplicates" hx-target="#exclude-duplicates-control" hx-swap="outerHTML">
             <label class="form-label" style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
-              <input type="checkbox" name="exclude_duplicates" value="1" onchange="this.form.requestSubmit()" {checked} style="width: 16px; height: 16px;">
+              <input type="checkbox" name="exclude_duplicates" value="1"
+                     onchange="this.form.requestSubmit()" {checked}
+                     style="width: 16px; height: 16px;">
               Exclude duplicates from gallery
             </label>
-            <span class="form-help">Show only one file per duplicate group in the media list, even when duplicates sit in different folders.</span>
+            <span class="form-help">Show only one file per duplicate group in the media list,
+              even when duplicates sit in different folders.</span>
           </form>
         </div>
         """)
@@ -806,7 +880,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
     @app.post("/api/duplicates/scan", response_class=HTMLResponse)
     async def scan_duplicates_endpoint(request: Request):
         # 1. Collect indexed records, refreshing fingerprints only when size/mtime changed
-        entries: List[Dict[str, Any]] = []
+        entries: list[dict[str, Any]] = []
         recomputed = 0
         for rec in db.get_hash_records():
             p = Path(rec["file_path"])
@@ -817,24 +891,32 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             except OSError:
                 continue
             cached = rec.get("content_hash") or ""
-            if cached and int(rec.get("file_size") or 0) == st.st_size and abs(float(rec.get("mtime") or 0.0) - st.st_mtime) < 0.001:
+            if (
+                cached
+                and int(rec.get("file_size") or 0) == st.st_size
+                and abs(float(rec.get("mtime") or 0.0) - st.st_mtime) < 0.001
+            ):
                 h = cached
             else:
                 h = compute_quick_hash(p)
                 db.update_image_meta(int(rec["id"]), file_size=st.st_size, mtime=st.st_mtime, content_hash=h)
                 recomputed += 1
-            entries.append({
-                "id": int(rec["id"]),
-                "file_path": rec["file_path"],
-                "filename": p.name,
-                "file_size": st.st_size,
-                "content_hash": h,
-            })
+            entries.append(
+                {
+                    "id": int(rec["id"]),
+                    "file_path": rec["file_path"],
+                    "filename": p.name,
+                    "file_size": st.st_size,
+                    "content_hash": h,
+                }
+            )
 
         # 2. Walk the filesystem for media files that are not yet indexed
         existing_paths = {e["file_path"] for e in entries}
         new_found = 0
-        input_dir = db.get_setting("input_dir") or (str(Path("pictures").resolve()) if Path("pictures").exists() else str(Path.cwd()))
+        input_dir = db.get_setting("input_dir") or (
+            str(Path("pictures").resolve()) if Path("pictures").exists() else str(Path.cwd())
+        )
         if Path(input_dir).exists():
             for p in scan_media_paths(input_dir):
                 rp = str(p.resolve())
@@ -844,17 +926,19 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
                     st = p.stat()
                 except OSError:
                     continue
-                entries.append({
-                    "id": None,
-                    "file_path": rp,
-                    "filename": p.name,
-                    "file_size": st.st_size,
-                    "content_hash": compute_quick_hash(p),
-                })
+                entries.append(
+                    {
+                        "id": None,
+                        "file_path": rp,
+                        "filename": p.name,
+                        "file_size": st.st_size,
+                        "content_hash": compute_quick_hash(p),
+                    }
+                )
                 new_found += 1
 
         # 3. Group by content fingerprint
-        by_hash: Dict[str, List[Dict[str, Any]]] = {}
+        by_hash: dict[str, list[dict[str, Any]]] = {}
         for e in entries:
             if e["content_hash"]:
                 by_hash.setdefault(e["content_hash"], []).append(e)
@@ -870,12 +954,14 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             total_duplicates += len(dups)
             for item in g_sorted:
                 item["has_image_id"] = item["id"] is not None
-            groups.append({
-                "content_hash": g[0]["content_hash"],
-                "size": len(g),
-                "keep": keep,
-                "duplicates": dups,
-            })
+            groups.append(
+                {
+                    "content_hash": g[0]["content_hash"],
+                    "size": len(g),
+                    "keep": keep,
+                    "duplicates": dups,
+                }
+            )
 
         results = {
             "total_files": len(entries),
@@ -910,23 +996,29 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
     ):
         if not Path(input_dir).exists():
             return HTMLResponse(
-                f"""<div class="alert alert-error" style="background: rgba(239, 68, 68, 0.15); border: 1px solid #ef4444; color: #fca5a5; padding: 0.75rem 1rem; border-radius: 8px;">
+                f"""<div class="alert alert-error"
+                     style="background: rgba(239, 68, 68, 0.15); border: 1px solid #ef4444; color: #fca5a5;
+                            padding: 0.75rem 1rem; border-radius: 8px;">
                     Directory not found: {input_dir}
                 </div>"""
             )
 
         # Save settings to DB
-        db.set_settings({
-            "input_dir": input_dir,
-            "conf_threshold": str(conf_threshold),
-            "eps": str(eps),
-            "min_samples": str(min_samples),
-            "algorithm": algorithm,
-            "min_interval_sec": str(min_interval_sec),
-            "recognition_match_threshold": str(recognition_match_threshold),
-            "include_cluster_references": "1" if str(include_cluster_references).lower() in ("1", "true", "on", "yes") else "",
-            "intra_video_merge_threshold": str(intra_video_merge_threshold),
-        })
+        db.set_settings(
+            {
+                "input_dir": input_dir,
+                "conf_threshold": str(conf_threshold),
+                "eps": str(eps),
+                "min_samples": str(min_samples),
+                "algorithm": algorithm,
+                "min_interval_sec": str(min_interval_sec),
+                "recognition_match_threshold": str(recognition_match_threshold),
+                "include_cluster_references": "1"
+                if str(include_cluster_references).lower() in ("1", "true", "on", "yes")
+                else "",
+                "intra_video_merge_threshold": str(intra_video_merge_threshold),
+            }
+        )
 
         scan_mgr.start_scan(
             input_dir=input_dir,
@@ -978,12 +1070,12 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         img_meta = db.get_image(image_id)
         if not img_meta or not Path(img_meta["file_path"]).exists():
             raise HTTPException(status_code=404, detail="Image or video not found")
-        
+
         mime_type, _ = mimetypes.guess_type(img_meta["file_path"])
         return FileResponse(
             img_meta["file_path"],
             media_type=mime_type or "application/octet-stream",
-            headers={"Accept-Ranges": "bytes"}
+            headers={"Accept-Ranges": "bytes"},
         )
 
     @app.get("/api/photos/{image_id}/stream")
@@ -998,7 +1090,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             return FileResponse(
                 img_meta["file_path"],
                 media_type=mime_type or "application/octet-stream",
-                headers={"Accept-Ranges": "bytes"}
+                headers={"Accept-Ranges": "bytes"},
             )
 
         transcoded = cache.get_transcoded_video(img_meta["file_path"])
@@ -1006,34 +1098,29 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             # Fallback to direct raw file if transcoding is unavailable or fails
             mime_type, _ = mimetypes.guess_type(img_meta["file_path"])
             return FileResponse(
-                img_meta["file_path"],
-                media_type=mime_type or "video/mp4",
-                headers={"Accept-Ranges": "bytes"}
+                img_meta["file_path"], media_type=mime_type or "video/mp4", headers={"Accept-Ranges": "bytes"}
             )
 
         return FileResponse(
             transcoded,
             media_type="video/mp4",
-            headers={
-                "Accept-Ranges": "bytes",
-                "Cache-Control": "public, max-age=86400, immutable"
-            }
+            headers={"Accept-Ranges": "bytes", "Cache-Control": "public, max-age=86400, immutable"},
         )
 
     def _render_photo_modal_response(
         request: Request,
         image_id: int,
         filter_type: str = "all",
-        search: Optional[str] = None,
-        person_id: Optional[int] = None,
-        cluster_id: Optional[int] = None,
-        folder_path: Optional[str] = None,
+        search: str | None = None,
+        person_id: int | None = None,
+        cluster_id: int | None = None,
+        folder_path: str | None = None,
         folder_direct_only: bool = False,
-        similar_to: Optional[int] = None,
-        threshold: Optional[float] = None,
+        similar_to: int | None = None,
+        threshold: float | None = None,
         sort_by: str = "date",
         sort_order: str = "desc",
-        tag_id: Optional[int] = None,
+        tag_id: int | None = None,
     ) -> HTMLResponse:
         img_meta = db.get_image(image_id)
         if not img_meta:
@@ -1060,7 +1147,9 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
 
         try:
             suggested_tags = db.suggest_tags_for_image(image_id, top_k=6, min_score=0.50)
+        # Suggested tags are optional decoration.
         except Exception:
+            logger.debug("suggest_tags failed for image %s", image_id, exc_info=True)
             suggested_tags = []
 
         return templates.TemplateResponse(
@@ -1103,17 +1192,17 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         request: Request,
         image_id: int,
         filter: str = Query("all", alias="filter"),
-        search: Optional[str] = Query(None),
-        person_id: Optional[int] = Query(None),
-        cluster_id: Optional[int] = Query(None),
-        folder_path: Optional[str] = Query(None),
-        path: Optional[str] = Query(None),
-        direct_only: Optional[int] = Query(None),
-        similar_to: Optional[int] = Query(None),
-        threshold: Optional[float] = Query(None),
+        search: str | None = Query(None),
+        person_id: int | None = Query(None),
+        cluster_id: int | None = Query(None),
+        folder_path: str | None = Query(None),
+        path: str | None = Query(None),
+        direct_only: int | None = Query(None),
+        similar_to: int | None = Query(None),
+        threshold: float | None = Query(None),
         sort_by: str = Query("date", alias="sort"),
         sort_order: str = Query("desc", alias="order"),
-        tag_id: Optional[int] = Query(None),
+        tag_id: int | None = Query(None),
     ):
         effective_folder = folder_path or path
         is_direct = bool(direct_only == 1 or path or ("/folders" in request.headers.get("referer", "")))
@@ -1147,7 +1236,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             fav_active = "active" if img_meta["is_favorite"] else ""
             fill_color = "currentColor" if img_meta["is_favorite"] else "none"
             return HTMLResponse(f"""
-                <button 
+                <button
                   class="fav-btn {fav_active}"
                   hx-post="/api/photos/{image_id}/favorite"
                   hx-target="#modal-fav-btn"
@@ -1155,8 +1244,10 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
                   id="modal-fav-btn"
                   title="Toggle favorite"
                 >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="{fill_color}" stroke="currentColor" stroke-width="2">
-                    <path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="{fill_color}"
+                       stroke="currentColor" stroke-width="2">
+                    <path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2
+                             -1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/>
                   </svg>
                 </button>
             """)
@@ -1168,7 +1259,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         )
 
     @app.get("/api/tags/list")
-    async def get_tags_list(search: Optional[str] = Query(None)):
+    async def get_tags_list(search: str | None = Query(None)):
         return JSONResponse({"tags": db.get_all_tags(search=search)})
 
     @app.get("/api/tags/picker", response_class=HTMLResponse)
@@ -1176,13 +1267,13 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         request: Request,
         image_id: int = Query(...),
         filter_type: str = Query("all"),
-        search: Optional[str] = Query(None),
-        person_id: Optional[int] = Query(None),
-        cluster_id: Optional[int] = Query(None),
-        folder_path: Optional[str] = Query(None),
+        search: str | None = Query(None),
+        person_id: int | None = Query(None),
+        cluster_id: int | None = Query(None),
+        folder_path: str | None = Query(None),
         sort_by: str = Query("date"),
         sort_order: str = Query("desc"),
-        ctx_tag_id: Optional[int] = Query(None),
+        ctx_tag_id: int | None = Query(None),
     ):
         img = db.get_image(image_id)
         if not img:
@@ -1219,15 +1310,15 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         image_id: int,
         tags: str = Form(""),
         filter_type: str = Form("all"),
-        search: Optional[str] = Form(None),
-        person_id: Optional[int] = Form(None),
-        cluster_id: Optional[int] = Form(None),
-        folder_path: Optional[str] = Form(None),
-        similar_to: Optional[int] = Form(None),
-        threshold: Optional[float] = Form(None),
+        search: str | None = Form(None),
+        person_id: int | None = Form(None),
+        cluster_id: int | None = Form(None),
+        folder_path: str | None = Form(None),
+        similar_to: int | None = Form(None),
+        threshold: float | None = Form(None),
         sort_by: str = Form("date"),
         sort_order: str = Form("desc"),
-        ctx_tag_id: Optional[int] = Form(None),
+        ctx_tag_id: int | None = Form(None),
     ):
         tag_names = [t.strip() for t in tags.split(",") if t.strip()]
         db.add_tags_to_image(image_id, tag_names)
@@ -1252,15 +1343,15 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         image_id: int,
         tag_id: int,
         filter_type: str = Form("all"),
-        search: Optional[str] = Form(None),
-        person_id: Optional[int] = Form(None),
-        cluster_id: Optional[int] = Form(None),
-        folder_path: Optional[str] = Form(None),
-        similar_to: Optional[int] = Form(None),
-        threshold: Optional[float] = Form(None),
+        search: str | None = Form(None),
+        person_id: int | None = Form(None),
+        cluster_id: int | None = Form(None),
+        folder_path: str | None = Form(None),
+        similar_to: int | None = Form(None),
+        threshold: float | None = Form(None),
         sort_by: str = Form("date"),
         sort_order: str = Form("desc"),
-        ctx_tag_id: Optional[int] = Form(None),
+        ctx_tag_id: int | None = Form(None),
     ):
         db.remove_tag_from_image(image_id, tag_id)
         return _render_photo_modal_response(
@@ -1322,7 +1413,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         return HTMLResponse(f"""
             <div id="cluster-name-section" style="display: flex; align-items: center; gap: 0.75rem;">
                 <span style="font-size: 1.25rem; font-weight: 700; color: #a5b4fc;">{name}</span>
-                <a href="/person/{person_id}" class="btn btn-primary" style="padding: 0.3rem 0.75rem; font-size: 0.8125rem;">View Person Profile →</a>
+                <a href="/person/{person_id}" class="btn btn-primary"
+                   style="padding: 0.3rem 0.75rem; font-size: 0.8125rem;">View Person Profile →</a>
             </div>
         """)
 
@@ -1331,8 +1423,11 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         db.name_person(name=name, person_id=person_id)
         return HTMLResponse(f"""
           <div id="person-name-section">
-            <form hx-post="/api/people/{person_id}/name" hx-target="#person-name-section" hx-swap="outerHTML" style="display: flex; align-items: center; gap: 0.5rem; max-width: 400px;">
-              <input type="text" name="name" value="{name}" class="inline-edit-input" style="font-size: 1.25rem; font-weight: 700; padding: 0.4rem 0.75rem;">
+            <form hx-post="/api/people/{person_id}/name" hx-target="#person-name-section"
+                  hx-swap="outerHTML"
+                  style="display: flex; align-items: center; gap: 0.5rem; max-width: 400px;">
+              <input type="text" name="name" value="{name}" class="inline-edit-input"
+                     style="font-size: 1.25rem; font-weight: 700; padding: 0.4rem 0.75rem;">
               <button type="submit" class="btn btn-primary" style="white-space: nowrap;">Saved ✓</button>
             </form>
           </div>
@@ -1343,8 +1438,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         request: Request,
         mode: str = Query("move_face"),
         source_id: int = Query(...),
-        image_id: Optional[int] = Query(None),
-        source_name: Optional[str] = Query(""),
+        image_id: int | None = Query(None),
+        source_name: str | None = Query(""),
     ):
         all_targets = db.get_people(cluster_limit=50)
         if mode == "merge_person":
@@ -1371,8 +1466,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         request: Request,
         mode: str = Query("move_face"),
         source_id: int = Query(...),
-        image_id: Optional[int] = Query(None),
-        search: Optional[str] = Query(None),
+        image_id: int | None = Query(None),
+        search: str | None = Query(None),
     ):
         search_term = (search or "").strip()
         limit = 100 if search_term else 50
@@ -1401,8 +1496,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         face_id: int,
         image_id: int = Form(...),
         target_type: str = Form(...),
-        target_id: Optional[int] = Form(None),
-        new_name: Optional[str] = Form(None),
+        target_id: int | None = Form(None),
+        new_name: str | None = Form(None),
     ):
         if target_type == "person":
             db.move_face(face_id, target_person_id=target_id)
@@ -1433,9 +1528,9 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
     @app.post("/api/people/{person_id}/merge")
     async def merge_person_endpoint(
         person_id: int,
-        target_person_id: Optional[int] = Form(None),
-        target_type: Optional[str] = Form("person"),
-        target_id: Optional[int] = Form(None),
+        target_person_id: int | None = Form(None),
+        target_type: str | None = Form("person"),
+        target_id: int | None = Form(None),
     ):
         tgt_id = target_person_id if target_person_id is not None else target_id
         if tgt_id is None:
@@ -1469,15 +1564,19 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         exemplars = db.get_person_exemplars(person_id, max_exemplars=5)
         if not exemplars:
             return HTMLResponse(f"""
-                <div class="alert alert-info" style="background: rgba(59, 130, 246, 0.15); border: 1px solid #3b82f6; color: #93c5fd; padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem;">
-                    No reference face embeddings found for {p['name']}. Assign at least one face first.
+                <div class="alert alert-info"
+                     style="background: rgba(59, 130, 246, 0.15); border: 1px solid #3b82f6; color: #93c5fd;
+                            padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem;">
+                    No reference face embeddings found for {p["name"]}. Assign at least one face first.
                 </div>
             """)
 
         unassigned_faces = db.get_unassigned_faces()
         if not unassigned_faces:
             return HTMLResponse("""
-                <div class="alert alert-info" style="background: rgba(59, 130, 246, 0.15); border: 1px solid #3b82f6; color: #93c5fd; padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem;">
+                <div class="alert alert-info"
+                     style="background: rgba(59, 130, 246, 0.15); border: 1px solid #3b82f6; color: #93c5fd;
+                            padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem;">
                     All faces in library are already assigned to people.
                 </div>
             """)
@@ -1493,34 +1592,40 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             return Response(status_code=200, headers={"HX-Refresh": "true"})
 
         return HTMLResponse(f"""
-            <div class="alert alert-info" style="background: rgba(59, 130, 246, 0.15); border: 1px solid #3b82f6; color: #93c5fd; padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem;">
-                Scanned {len(unassigned_faces)} unassigned faces: 0 matched {p['name']} (threshold: {threshold:.2f}).
+            <div class="alert alert-info"
+                     style="background: rgba(59, 130, 246, 0.15); border: 1px solid #3b82f6; color: #93c5fd;
+                            padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem;">
+                Scanned {len(unassigned_faces)} unassigned faces: 0 matched {p["name"]} (threshold: {threshold:.2f}).
             </div>
         """)
 
     @app.get("/api/people/all/candidates")
     async def get_all_people_candidates_endpoint(
         limit: int = Query(10, ge=1, le=50),
-        min_dist: Optional[float] = Query(None),
-        max_dist: Optional[float] = Query(None),
+        min_dist: float | None = Query(None),
+        max_dist: float | None = Query(None),
     ):
         all_exemplars = db.get_all_person_exemplars(max_exemplars=5)
         unassigned_faces = db.get_unassigned_faces()
         total_unassigned = len(unassigned_faces)
 
         if not all_exemplars:
-            return JSONResponse({
-                "candidates": [],
-                "total_unassigned": total_unassigned,
-                "message": "No named people found in library. Name at least one person first.",
-            })
+            return JSONResponse(
+                {
+                    "candidates": [],
+                    "total_unassigned": total_unassigned,
+                    "message": "No named people found in library. Name at least one person first.",
+                }
+            )
 
         if not unassigned_faces:
-            return JSONResponse({
-                "candidates": [],
-                "total_unassigned": 0,
-                "message": "All faces in library are already assigned to people.",
-            })
+            return JSONResponse(
+                {
+                    "candidates": [],
+                    "total_unassigned": 0,
+                    "message": "All faces in library are already assigned to people.",
+                }
+            )
 
         rec_thresh = float(db.get_setting("recognition_match_threshold", 0.42))
         _min_dist = min_dist if min_dist is not None else max(0.20, rec_thresh - 0.05)
@@ -1542,31 +1647,35 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         for c in cands:
             p_id = c["target_person_id"]
             p_info = all_people.get(p_id, {})
-            formatted_cands.append({
-                "face_id": c["id"],
-                "image_id": c["image_id"],
-                "person_id": p_id,
-                "person_name": p_info.get("name", f"Person #{p_id}"),
-                "person_cover_face_id": p_info.get("cover_face_id"),
-                "distance": c["distance"],
-                "similarity_pct": c["similarity_pct"],
-                "file_path": c["file_path"],
-                "filename": Path(c["file_path"]).name if c.get("file_path") else "",
-                "bbox": c["bbox"],
-            })
+            formatted_cands.append(
+                {
+                    "face_id": c["id"],
+                    "image_id": c["image_id"],
+                    "person_id": p_id,
+                    "person_name": p_info.get("name", f"Person #{p_id}"),
+                    "person_cover_face_id": p_info.get("cover_face_id"),
+                    "distance": c["distance"],
+                    "similarity_pct": c["similarity_pct"],
+                    "file_path": c["file_path"],
+                    "filename": Path(c["file_path"]).name if c.get("file_path") else "",
+                    "bbox": c["bbox"],
+                }
+            )
 
-        return JSONResponse({
-            "candidates": formatted_cands,
-            "total_unassigned": total_unassigned,
-            "message": "No uncertain matches found in library." if not formatted_cands else "",
-        })
+        return JSONResponse(
+            {
+                "candidates": formatted_cands,
+                "total_unassigned": total_unassigned,
+                "message": "No uncertain matches found in library." if not formatted_cands else "",
+            }
+        )
 
     @app.get("/api/people/{person_id}/candidates")
     async def get_person_candidates_endpoint(
         person_id: int,
         limit: int = Query(10, ge=1, le=50),
-        min_dist: Optional[float] = Query(None),
-        max_dist: Optional[float] = Query(None),
+        min_dist: float | None = Query(None),
+        max_dist: float | None = Query(None),
     ):
         p = db.get_person(person_id)
         if not p:
@@ -1574,19 +1683,23 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
 
         exemplars = db.get_person_exemplars(person_id, max_exemplars=5)
         if not exemplars:
-            return JSONResponse({
-                "person": {"id": p["id"], "name": p["name"], "cover_face_id": p.get("cover_face_id")},
-                "candidates": [],
-                "message": f"No reference face embeddings found for {p['name']}. Assign at least one face first.",
-            })
+            return JSONResponse(
+                {
+                    "person": {"id": p["id"], "name": p["name"], "cover_face_id": p.get("cover_face_id")},
+                    "candidates": [],
+                    "message": f"No reference face embeddings found for {p['name']}. Assign at least one face first.",
+                }
+            )
 
         unassigned_faces = db.get_unassigned_faces()
         if not unassigned_faces:
-            return JSONResponse({
-                "person": {"id": p["id"], "name": p["name"], "cover_face_id": p.get("cover_face_id")},
-                "candidates": [],
-                "message": "No unassigned faces left in library.",
-            })
+            return JSONResponse(
+                {
+                    "person": {"id": p["id"], "name": p["name"], "cover_face_id": p.get("cover_face_id")},
+                    "candidates": [],
+                    "message": "No unassigned faces left in library.",
+                }
+            )
 
         rec_thresh = float(db.get_setting("recognition_match_threshold", 0.42))
         _min_dist = min_dist if min_dist is not None else max(0.20, rec_thresh - 0.05)
@@ -1605,25 +1718,29 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
 
         formatted_cands = []
         for c in cands:
-            formatted_cands.append({
-                "face_id": c["id"],
-                "image_id": c["image_id"],
-                "distance": c["distance"],
-                "similarity_pct": c["similarity_pct"],
-                "file_path": c["file_path"],
-                "filename": Path(c["file_path"]).name if c.get("file_path") else "",
-                "bbox": c["bbox"],
-            })
+            formatted_cands.append(
+                {
+                    "face_id": c["id"],
+                    "image_id": c["image_id"],
+                    "distance": c["distance"],
+                    "similarity_pct": c["similarity_pct"],
+                    "file_path": c["file_path"],
+                    "filename": Path(c["file_path"]).name if c.get("file_path") else "",
+                    "bbox": c["bbox"],
+                }
+            )
 
-        return JSONResponse({
-            "person": {
-                "id": p["id"],
-                "name": p["name"],
-                "cover_face_id": p.get("cover_face_id"),
-            },
-            "candidates": formatted_cands,
-            "total_unassigned": len(unassigned_faces),
-        })
+        return JSONResponse(
+            {
+                "person": {
+                    "id": p["id"],
+                    "name": p["name"],
+                    "cover_face_id": p.get("cover_face_id"),
+                },
+                "candidates": formatted_cands,
+                "total_unassigned": len(unassigned_faces),
+            }
+        )
 
     @app.post("/api/people/{person_id}/confirm-match")
     async def confirm_person_match_endpoint(
@@ -1655,7 +1772,9 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         all_exemplars = db.get_all_person_exemplars(max_exemplars=5)
         if not all_exemplars:
             return HTMLResponse("""
-                <div class="alert alert-info" style="background: rgba(59, 130, 246, 0.15); border: 1px solid #3b82f6; color: #93c5fd; padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem;">
+                <div class="alert alert-info"
+                     style="background: rgba(59, 130, 246, 0.15); border: 1px solid #3b82f6; color: #93c5fd;
+                            padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem;">
                     No named people found in library. Name at least one person first.
                 </div>
             """)
@@ -1663,7 +1782,9 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         unassigned_faces = db.get_unassigned_faces()
         if not unassigned_faces:
             return HTMLResponse("""
-                <div class="alert alert-info" style="background: rgba(59, 130, 246, 0.15); border: 1px solid #3b82f6; color: #93c5fd; padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem;">
+                <div class="alert alert-info"
+                     style="background: rgba(59, 130, 246, 0.15); border: 1px solid #3b82f6; color: #93c5fd;
+                            padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem;">
                     All faces in library are already assigned to people!
                 </div>
             """)
@@ -1675,12 +1796,15 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
 
         if not matched_results:
             return HTMLResponse(f"""
-                <div class="alert alert-info" style="background: rgba(59, 130, 246, 0.15); border: 1px solid #3b82f6; color: #93c5fd; padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem;">
-                    Scanned {len(unassigned_faces)} unassigned faces: 0 matches found for named people (threshold: {threshold:.2f}).
+                <div class="alert alert-info"
+                     style="background: rgba(59, 130, 246, 0.15); border: 1px solid #3b82f6; color: #93c5fd;
+                            padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem;">
+                    Scanned {len(unassigned_faces)} unassigned faces: 0 matches found for named
+                    people (threshold: {threshold:.2f}).
                 </div>
             """)
 
-        person_to_faces: Dict[int, List[int]] = {}
+        person_to_faces: dict[int, list[int]] = {}
         for f_id, (p_id, _dist) in matched_results.items():
             if p_id not in person_to_faces:
                 person_to_faces[p_id] = []
@@ -1692,7 +1816,9 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         total_matched = len(matched_results)
         num_people_matched = len(person_to_faces)
         return HTMLResponse(f"""
-            <div class="alert alert-success" style="background: rgba(16, 185, 129, 0.15); border: 1px solid #10b981; color: #6ee7b7; padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem;">
+            <div class="alert alert-success"
+                     style="background: rgba(16, 185, 129, 0.15); border: 1px solid #10b981; color: #6ee7b7;
+                            padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem;">
                 ✓ Auto-tagged {total_matched} faces across {num_people_matched} named people!
             </div>
         """)
@@ -1704,18 +1830,20 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
 
     # ==================== FILE MANAGEMENT ENDPOINTS ====================
 
-    async def _extract_request_payload(req: Request) -> Dict[str, Any]:
+    async def _extract_request_payload(req: Request) -> dict[str, Any]:
         """Extract parameters from either application/json or multipart/form-data / x-www-form-urlencoded."""
         c_type = req.headers.get("content-type", "")
         if "application/json" in c_type:
             try:
                 return await req.json()
             except Exception:
+                logger.debug("Could not parse JSON request body", exc_info=True)
                 return {}
         try:
             form = await req.form()
             return dict(form)
         except Exception:
+            logger.debug("Could not parse form request body", exc_info=True)
             return {}
 
     @app.post("/api/files/delete")
@@ -1732,10 +1860,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             if img and img.get("file_path"):
                 fpath = Path(img["file_path"])
                 if fpath.exists() and fpath.is_file():
-                    try:
+                    with contextlib.suppress(Exception):
                         fpath.unlink(missing_ok=True)
-                    except Exception:
-                        pass
                 cache.invalidate_media_cache(img["file_path"])
                 deleted_count += 1
 
@@ -1754,7 +1880,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         try:
             img_id = int(img_id)
         except (ValueError, TypeError):
-            raise HTTPException(status_code=400, detail="Invalid image_id")
+            raise HTTPException(status_code=400, detail="Invalid image_id") from None
 
         new_name = str(new_name).strip()
         if not new_name or "/" in new_name or "\\" in new_name or ".." in new_name:
@@ -1774,7 +1900,9 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
 
         dest_path = old_path.parent / new_name
         if dest_path.resolve() == old_path.resolve():
-            return JSONResponse({"status": "success", "image_id": img_id, "new_name": new_name, "new_path": str(dest_path)})
+            return JSONResponse(
+                {"status": "success", "image_id": img_id, "new_name": new_name, "new_path": str(dest_path)}
+            )
 
         if dest_path.exists():
             raise HTTPException(status_code=400, detail=f"A file named '{new_name}' already exists in this folder")
@@ -1782,17 +1910,12 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         try:
             old_path.rename(dest_path)
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to rename file: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to rename file: {e}") from e
 
         cache.invalidate_media_cache(old_path)
         db.update_image_path(img_id, str(dest_path))
 
-        return JSONResponse({
-            "status": "success",
-            "image_id": img_id,
-            "new_name": new_name,
-            "new_path": str(dest_path)
-        })
+        return JSONResponse({"status": "success", "image_id": img_id, "new_name": new_name, "new_path": str(dest_path)})
 
     @app.post("/api/files/batch-rename")
     async def batch_rename_endpoint(request: Request):
@@ -1829,10 +1952,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             elif mode == "suffix":
                 new_filename = f"{stem}{suffix}{ext}"
             elif mode == "replace":
-                if find_text:
-                    new_filename = f"{stem.replace(find_text, replace_text)}{ext}"
-                else:
-                    new_filename = old_path.name
+                new_filename = f"{stem.replace(find_text, replace_text)}{ext}" if find_text else old_path.name
             elif mode == "pattern":
                 seq_num = start_index + idx
                 if "{n}" in pattern:
@@ -1863,7 +1983,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
                 db.update_image_path(img_id, str(dest_path))
                 renamed_count += 1
             except Exception:
-                pass
+                logger.warning("Failed to rename image %s", img_id, exc_info=True)
 
         return JSONResponse({"status": "success", "renamed_count": renamed_count})
 
@@ -1902,13 +2022,9 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
                 db.update_image_path(img_id, str(target_path))
                 moved_count += 1
             except Exception:
-                pass
+                logger.warning("Failed to move image %s", img_id, exc_info=True)
 
-        return JSONResponse({
-            "status": "success",
-            "moved_count": moved_count,
-            "destination": str(dest_dir)
-        })
+        return JSONResponse({"status": "success", "moved_count": moved_count, "destination": str(dest_dir)})
 
     @app.post("/api/files/copy")
     async def copy_files_endpoint(request: Request):
@@ -1946,7 +2062,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
                 db.clone_image_record(img_id, str(target_path))
                 copied_count += 1
             except Exception:
-                pass
+                logger.warning("Failed to copy image %s", img_id, exc_info=True)
 
         return JSONResponse({"status": "success", "copied_count": copied_count})
 
@@ -1955,10 +2071,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         payload = await _extract_request_payload(request)
         raw_ids = _parse_image_ids(payload.get("image_ids"))
         raw_fav = payload.get("is_favorite", True)
-        if isinstance(raw_fav, str):
-            is_favorite = raw_fav.lower() in ("true", "1", "yes")
-        else:
-            is_favorite = bool(raw_fav)
+        is_favorite = raw_fav.lower() in ("true", "1", "yes") if isinstance(raw_fav, str) else bool(raw_fav)
 
         if not raw_ids:
             raise HTTPException(status_code=400, detail="No image IDs provided")
@@ -1985,7 +2098,14 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
 
         dest_dir = old_dir.parent / new_name
         if dest_dir.resolve() == old_dir:
-            return JSONResponse({"status": "success", "renamed_count": 0, "new_path": str(dest_dir.resolve()), "new_parent": str(dest_dir.parent.resolve())})
+            return JSONResponse(
+                {
+                    "status": "success",
+                    "renamed_count": 0,
+                    "new_path": str(dest_dir.resolve()),
+                    "new_parent": str(dest_dir.parent.resolve()),
+                }
+            )
 
         if dest_dir.exists():
             raise HTTPException(status_code=400, detail=f"A folder named '{new_name}' already exists here")
@@ -1993,18 +2113,20 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         try:
             old_dir.rename(dest_dir)
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to rename folder: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to rename folder: {e}") from e
 
         old_paths = db.update_folder_paths(old_dir, dest_dir)
         for old_p in old_paths:
             cache.invalidate_media_cache(old_p)
 
-        return JSONResponse({
-            "status": "success",
-            "renamed_count": len(old_paths),
-            "new_path": str(dest_dir.resolve()),
-            "new_parent": str(dest_dir.parent.resolve()),
-        })
+        return JSONResponse(
+            {
+                "status": "success",
+                "renamed_count": len(old_paths),
+                "new_path": str(dest_dir.resolve()),
+                "new_parent": str(dest_dir.parent.resolve()),
+            }
+        )
 
     @app.get("/api/folders/list")
     async def get_folders_list():
@@ -2016,7 +2138,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         request: Request,
         action: str = Query("move"),
         image_ids: str = Query(""),
-        current_folder: Optional[str] = Query(None),
+        current_folder: str | None = Query(None),
     ):
         folders = db.get_all_folder_paths()
         source_root = _media_source_root()
@@ -2046,4 +2168,3 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         )
 
     return app
-

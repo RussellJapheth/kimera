@@ -1,16 +1,21 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Russell Japheth
+#
+# This file is part of Kimera. See the LICENSE file for details.
+
 """
 Tests for media gallery database extensions, caching, and web server endpoints.
 """
 
 from pathlib import Path
-import numpy as np
-from PIL import Image
-import pytest
-from fastapi.testclient import TestClient
 
+import numpy as np
+import pytest
 from app.cache import ThumbnailCache
 from app.db import Database
 from app.server import create_app
+from fastapi.testclient import TestClient
+from PIL import Image
 
 
 @pytest.fixture
@@ -50,7 +55,7 @@ def test_env(tmp_path: Path):
 def test_favorites_and_filtering(test_env):
     db = test_env["db"]
     id1 = test_env["id1"]
-    id2 = test_env["id2"]
+    test_env["id2"]
 
     # Initially neither is favorite
     res = db.get_images(filter_type="favorites")
@@ -116,7 +121,7 @@ def test_people_naming_and_merging(test_env):
 
     # Create another person "Bob"
     p_id2 = db.name_person(name="Bob", cluster_id=-1, face_id=f1)
-    
+
     # Merge Bob into Alice Smith
     db.merge_people(source_person_id=p_id2, target_person_id=p_id1)
     assert db.get_person(p_id2) is None
@@ -141,6 +146,7 @@ def test_thumbnail_and_face_crop_cache(test_env):
 
     # Dummy video file thumbnail generation
     import cv2
+
     video_file = test_env["cache_dir"].parent / "sample.mp4"
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     out = cv2.VideoWriter(str(video_file), fourcc, 10.0, (320, 240))
@@ -236,7 +242,7 @@ def test_cache_configuration_and_stats(tmp_path: Path):
     """Verify cache directory configuration, stats calculation, and clearing."""
     from app.cache import DEFAULT_CACHE_DIR, ThumbnailCache
 
-    assert DEFAULT_CACHE_DIR == Path.cwd() / ".cache"
+    assert Path.cwd() / ".cache" == DEFAULT_CACHE_DIR
 
     c_dir = tmp_path / "custom_cache"
     cache = ThumbnailCache(c_dir)
@@ -335,7 +341,7 @@ def test_photo_modal_context_and_folder_link(test_env):
     """Verify modal endpoint respects folder path, person_id, and links to folder."""
     db = test_env["db"]
     id1 = test_env["id1"]
-    id2 = test_env["id2"]
+    test_env["id2"]
     img1 = test_env["img1"]
 
     app = create_app(db_path=str(test_env["db_file"]), cache_dir=str(test_env["cache_dir"]))
@@ -356,6 +362,3 @@ def test_photo_modal_context_and_folder_link(test_env):
     p_id = db.name_person(name="Alice", cluster_id=0)
     resp_person = client.get(f"/api/photos/{id1}/modal?person_id={p_id}")
     assert resp_person.status_code == 200
-
-
-

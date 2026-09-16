@@ -1,15 +1,18 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Russell Japheth
+#
+# This file is part of Kimera. See the LICENSE file for details.
+
 """
 Unit and integration tests for Kimera basic and bulk file operations.
 Covers: deleting, renaming, batch renaming, moving, copying/duplicating, and batch favoriting.
 """
 
-from pathlib import Path
 import numpy as np
 import pytest
-from fastapi.testclient import TestClient
-
 from app.db import Database
 from app.server import create_app
+from fastapi.testclient import TestClient
 
 
 @pytest.fixture

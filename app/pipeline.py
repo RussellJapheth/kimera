@@ -1,3 +1,8 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Russell Japheth
+#
+# This file is part of Kimera. See the LICENSE file for details.
+
 """
 Pipeline orchestrator connecting scanning, detection, embedding, clustering, and SQLite storage.
 """
@@ -5,10 +10,14 @@ Pipeline orchestrator connecting scanning, detection, embedding, clustering, and
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
+import logging
 import queue
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Set, Tuple
+from typing import Any, NamedTuple
+
 import numpy as np
 from tqdm import tqdm
 
@@ -25,12 +34,16 @@ from app.scanner import (
     scan_media_paths,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class FileScanTask(NamedTuple):
+    """Work item describing one file and whether it needs (re)scanning."""
+
     path: Path
     path_str: str
     needs_scan: bool
-    image_id: Optional[int]
+    image_id: int | None
     file_size: int
     mtime: float
     content_hash: str
@@ -39,8 +52,8 @@ class FileScanTask(NamedTuple):
 
 def _prefilter_file(
     path: Path,
-    meta: Optional[Dict[str, Any]],
-) -> Tuple[FileScanTask, Optional[Tuple[int, int, float, str]]]:
+    meta: dict[str, Any] | None,
+) -> tuple[FileScanTask, tuple[int, int, float, str] | None]:
     """
     Worker function to check file stats and content hashes in parallel.
     Returns (FileScanTask, touch_update_tuple)
@@ -51,7 +64,7 @@ def _prefilter_file(
         stat = path.stat()
         cur_size = stat.st_size
         cur_mtime = stat.st_mtime
-    except Exception:
+    except OSError:
         return (
             FileScanTask(
                 path=path,
@@ -152,7 +165,7 @@ def run_intra_video_merge(db: Database, threshold: float = 0.30) -> None:
     if not components:
         return
 
-    all_cids: Set[int] = set()
+    all_cids: set[int] = set()
     for comp in components:
         all_cids.update(comp["clusters"].keys())
     member_map = db.get_face_ids_by_clusters(sorted(all_cids)) if all_cids else {}
@@ -182,20 +195,20 @@ def run_intra_video_merge(db: Database, threshold: float = 0.30) -> None:
 def run_pipeline(
     input_dir: Path | str,
     db_path: Path | str = "face_clusters.db",
-    cache_dir: Optional[Path | str] = None,
+    cache_dir: Path | str | None = None,
     conf_threshold: float = 0.60,
     eps: float = 0.43,
     min_samples: int = 1,
     clustering_algorithm: str = "agglomerative",
-    export_dir: Optional[Path | str] = None,
+    export_dir: Path | str | None = None,
     scene_threshold: float = 0.35,
     min_interval_sec: float = 60.0,
     max_interval_sec: float = 90.0,
-    match_threshold: Optional[float] = None,
-    include_cluster_references: Optional[bool] = None,
-    intra_video_merge_threshold: Optional[float] = None,
-    progress_callback: Optional[Callable[[str], None]] = None,
-) -> Dict[str, Any]:
+    match_threshold: float | None = None,
+    include_cluster_references: bool | None = None,
+    intra_video_merge_threshold: float | None = None,
+    progress_callback: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
     """
     Run high-performance incremental face scanning, detection, embedding, and clustering.
     Uses multi-threaded parallel pre-filtering and background image decode prefetching.
@@ -216,8 +229,8 @@ def run_pipeline(
     from app.cache import ThumbnailCache
 
     cache = ThumbnailCache(cache_dir)
-    detector: Optional[FaceDetector] = None
-    embedder: Optional[FaceEmbedder] = None
+    detector: FaceDetector | None = None
+    embedder: FaceEmbedder | None = None
 
     def notify_progress(msg: str, percent: int, current: int, total: int) -> None:
         if progress_callback is None:
@@ -225,10 +238,8 @@ def run_pipeline(
         try:
             progress_callback(msg, percent, current, total)
         except TypeError:
-            try:
+            with contextlib.suppress(Exception):
                 progress_callback(msg)
-            except Exception:
-                pass
 
     def get_models() -> tuple[FaceDetector, FaceEmbedder]:
         nonlocal detector, embedder
@@ -250,15 +261,12 @@ def run_pipeline(
     notify_progress(f"Checking library status for {total_media} files...", 2, 0, total_media)
     meta_map = db.get_all_images_file_meta_map()
 
-    tasks: List[FileScanTask] = []
-    touch_updates: List[Tuple[int, int, float, str]] = []
+    tasks: list[FileScanTask] = []
+    touch_updates: list[tuple[int, int, float, str]] = []
 
     # Check file stats & hashes concurrently across CPU threads
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(32, max(4, total_media))) as executor:
-        future_to_path = [
-            executor.submit(_prefilter_file, p, meta_map.get(str(p.resolve())))
-            for p in media_paths
-        ]
+        future_to_path = [executor.submit(_prefilter_file, p, meta_map.get(str(p.resolve()))) for p in media_paths]
         for fut in concurrent.futures.as_completed(future_to_path):
             task, touch_up = fut.result()
             tasks.append(task)
@@ -278,7 +286,9 @@ def run_pipeline(
 
     total_to_scan = len(items_to_scan)
     if total_to_scan > 0:
-        notify_progress(f"Found {total_to_scan} new/modified media items. Initializing AI models...", 4, 0, total_to_scan)
+        notify_progress(
+            f"Found {total_to_scan} new/modified media items. Initializing AI models...", 4, 0, total_to_scan
+        )
         get_models()
     else:
         notify_progress(f"All {total_media} files up-to-date. Checking clusters...", 90, total_media, total_media)
@@ -289,7 +299,7 @@ def run_pipeline(
         det, emb = get_models()
 
         # Prefetch pipeline for images
-        def image_loader(task_list: List[FileScanTask], out_q: queue.Queue, stop_ev: threading.Event) -> None:
+        def image_loader(task_list: list[FileScanTask], out_q: queue.Queue, stop_ev: threading.Event) -> None:
             for item in task_list:
                 if stop_ev.is_set():
                     break
@@ -326,7 +336,7 @@ def run_pipeline(
                         video_image_id = task.image_id
                         vid_w, vid_h = 0, 0
                         vid_dur = get_video_duration(task.path)
-                        vid_frames: List[np.ndarray] = []
+                        vid_frames: list[np.ndarray] = []
                         for kf in extract_video_keyframes(
                             task.path,
                             scene_threshold=scene_threshold,
@@ -346,7 +356,7 @@ def run_pipeline(
                                     mtime=task.mtime,
                                     content_hash=task.content_hash,
                                     duration=vid_dur,
-                                    )
+                                )
 
                             detected_faces = det.detect(kf.frame_rgb)
                             for face in detected_faces:
@@ -381,7 +391,7 @@ def run_pipeline(
                                 duration=vid_dur,
                             )
 
-                        # Compute and save visual embedding for video
+                        # Visual embedding is best-effort; a failure must not abort the scan.
                         try:
                             v_embedder = get_media_embedder(auto_download=False)
                             if v_embedder is not None and video_image_id is not None and vid_frames:
@@ -389,7 +399,7 @@ def run_pipeline(
                                 if v_emb is not None:
                                     db.save_media_embedding(video_image_id, v_emb)
                         except Exception:
-                            pass
+                            logger.debug("Visual embedding failed for video %s", task.path, exc_info=True)
                     else:
                         # Image file
                         if img_rgb is None:
@@ -428,14 +438,14 @@ def run_pipeline(
                                 cluster_id=-1,
                             )
 
-                        # Compute and save visual embedding for image
+                        # Visual embedding is best-effort; a failure must not abort the scan.
                         try:
                             v_embedder = get_media_embedder(auto_download=False)
                             if v_embedder is not None and image_id is not None:
                                 v_emb = v_embedder.embed_image(img_rgb)
                                 db.save_media_embedding(image_id, v_emb)
                         except Exception:
-                            pass
+                            logger.debug("Visual embedding failed for image %s", task.path, exc_info=True)
 
                     pbar.update(1)
         finally:
@@ -473,7 +483,7 @@ def run_pipeline(
         )
         if matched_results:
             # Group by person_id for batch DB update
-            person_to_faces: Dict[int, List[int]] = {}
+            person_to_faces: dict[int, list[int]] = {}
             for f_id, (p_id, _dist) in matched_results.items():
                 if p_id not in person_to_faces:
                     person_to_faces[p_id] = []
@@ -494,7 +504,7 @@ def run_pipeline(
                 orphan_faces,
                 threshold=effective_match_threshold,
             )
-            cluster_to_faces: Dict[int, List[int]] = {}
+            cluster_to_faces: dict[int, list[int]] = {}
             for f_id, (c_id, _dist) in cluster_matches.items():
                 if c_id not in cluster_to_faces:
                     cluster_to_faces[c_id] = []
@@ -525,8 +535,10 @@ def run_pipeline(
     # Export cutouts if requested
     if export_dir:
         import cv2
+
         out_root = Path(export_dir)
         import shutil
+
         if out_root.exists():
             shutil.rmtree(out_root)
         out_root.mkdir(parents=True, exist_ok=True)
@@ -565,7 +577,7 @@ def run_pipeline(
 
 def index_missing_media_embeddings(
     db: Database,
-    progress_callback: Optional[Callable] = None,
+    progress_callback: Callable | None = None,
 ) -> int:
     """
     Compute and save visual embeddings for all media files in the library
@@ -575,19 +587,15 @@ def index_missing_media_embeddings(
     missing_ids = db.get_unembedded_image_ids()
     if not missing_ids:
         if progress_callback:
-            try:
+            with contextlib.suppress(Exception):
                 progress_callback("All media embeddings up to date.", 100, 0, 0)
-            except Exception:
-                pass
         return 0
 
     embedder = get_media_embedder(auto_download=True)
     if embedder is None:
         if progress_callback:
-            try:
+            with contextlib.suppress(Exception):
                 progress_callback("CLIP vision model unavailable.", 0, 0, len(missing_ids))
-            except Exception:
-                pass
         return 0
 
     total = len(missing_ids)
@@ -603,15 +611,13 @@ def index_missing_media_embeddings(
             continue
 
         if progress_callback:
-            try:
+            with contextlib.suppress(Exception):
                 progress_callback(
                     f"Indexing visual embedding ({idx + 1}/{total}): {file_path.name}",
                     pct,
                     idx + 1,
                     total,
                 )
-            except Exception:
-                pass
 
         try:
             if img_info.get("is_video"):
@@ -631,14 +637,12 @@ def index_missing_media_embeddings(
                     emb = embedder.embed_image(img_rgb)
                     db.save_media_embedding(img_id, emb)
                     indexed += 1
-        except Exception as e:
-            print(f"Error embedding media {img_id}: {e}")
+        # One bad file must not abort the batch.
+        except Exception:
+            logger.warning("Error embedding media %s", img_id, exc_info=True)
 
     if progress_callback:
-        try:
+        with contextlib.suppress(Exception):
             progress_callback(f"Successfully generated {indexed} visual embeddings.", 100, total, total)
-        except Exception:
-            pass
 
     return indexed
-

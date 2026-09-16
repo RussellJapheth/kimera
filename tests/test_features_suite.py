@@ -1,13 +1,17 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Russell Japheth
+#
+# This file is part of Kimera. See the LICENSE file for details.
+
 import os
 import shutil
 import tempfile
-from pathlib import Path
+
 import numpy as np
 import pytest
-from fastapi.testclient import TestClient
-
 from app.db import Database
 from app.server import create_app
+from fastapi.testclient import TestClient
 
 
 @pytest.fixture
@@ -236,9 +240,9 @@ def test_cluster_renaming_on_face_page(test_env):
 
 def test_quick_hash_and_incremental_scanning(tmp_path):
     """Verify 64KB head+tail quick hashing and incremental pipeline rescan."""
-    from PIL import Image
-    from app.scanner import compute_quick_hash
     from app.pipeline import run_pipeline
+    from app.scanner import compute_quick_hash
+    from PIL import Image
 
     # Create dummy large file (> 128KB) with distinct head (64KB), middle, and tail (64KB)
     chunk = 65536
@@ -278,8 +282,10 @@ def test_quick_hash_and_incremental_scanning(tmp_path):
     mock_embedder = MagicMock()
 
     db_file = tmp_path / "incremental.db"
-    with patch("app.pipeline.FaceDetector", return_value=mock_detector), \
-         patch("app.pipeline.FaceEmbedder", return_value=mock_embedder):
+    with (
+        patch("app.pipeline.FaceDetector", return_value=mock_detector),
+        patch("app.pipeline.FaceEmbedder", return_value=mock_embedder),
+    ):
         res1 = run_pipeline(input_dir=img_dir, db_path=db_file)
         assert res1["images_scanned"] == 1
         assert mock_detector.detect.call_count == 1
@@ -292,8 +298,8 @@ def test_quick_hash_and_incremental_scanning(tmp_path):
 
 
 def test_model_download_with_progress(tmp_path):
-    from unittest.mock import patch, MagicMock
-    import io
+    from unittest.mock import MagicMock, patch
+
     from app.models import download_file
 
     fake_data = b"model_onnx_weights_bytes_12345"
@@ -303,6 +309,7 @@ def test_model_download_with_progress(tmp_path):
     mock_response.__enter__.return_value = mock_response
 
     progress_reports = []
+
     def callback(msg, pct=0, cur=0, tot=0):
         progress_reports.append((msg, pct, cur, tot))
 
@@ -324,14 +331,18 @@ def test_settings_persistence(test_env):
     assert db.get_setting("eps", "default") == "default"
 
     # Save settings via endpoint
-    resp = client.post("/api/settings/save", data={
-        "input_dir": "/tmp/media",
-        "conf_threshold": "0.60",
-        "eps": "0.38",
-        "min_samples": "2",
-        "algorithm": "agglomerative",
-        "min_interval_sec": "45.0"
-    })
+    resp = client.post(
+        "/api/settings/save",
+        data={
+            # Placeholder path in a settings payload; no files are created here.
+            "input_dir": "/tmp/media",  # noqa: S108
+            "conf_threshold": "0.60",
+            "eps": "0.38",
+            "min_samples": "2",
+            "algorithm": "agglomerative",
+            "min_interval_sec": "45.0",
+        },
+    )
     assert resp.status_code == 200
     assert "Settings saved successfully" in resp.text
 
@@ -347,7 +358,7 @@ def test_settings_persistence(test_env):
     assert get_resp.status_code == 200
     assert 'value="0.38"' in get_resp.text
     assert 'value="0.6"' in get_resp.text or 'value="0.60"' in get_resp.text
-    assert 'selected>Agglomerative' in get_resp.text
+    assert "selected>Agglomerative" in get_resp.text
 
 
 def test_move_face_and_unlink(test_env):
@@ -368,24 +379,30 @@ def test_move_face_and_unlink(test_env):
     assert face_rec["cluster_id"] == -1
 
     # 2. Move face to a new person
-    move_new_resp = client.post(f"/api/faces/{face_id}/move", data={
-        "image_id": id1,
-        "target_type": "new",
-        "new_name": "Bob",
-    })
+    move_new_resp = client.post(
+        f"/api/faces/{face_id}/move",
+        data={
+            "image_id": id1,
+            "target_type": "new",
+            "new_name": "Bob",
+        },
+    )
     assert move_new_resp.status_code == 200
     assert "Bob" in move_new_resp.text
     face_rec = db.get_face(face_id)
     assert face_rec["person_name"] == "Bob"
-    bob_person_id = face_rec["person_id"]
+    face_rec["person_id"]
 
     # 3. Move face to an existing person
     alice_id = test_env["person_id"]
-    move_existing_resp = client.post(f"/api/faces/{face_id}/move", data={
-        "image_id": id1,
-        "target_type": "person",
-        "target_id": alice_id,
-    })
+    move_existing_resp = client.post(
+        f"/api/faces/{face_id}/move",
+        data={
+            "image_id": id1,
+            "target_type": "person",
+            "target_id": alice_id,
+        },
+    )
     assert move_existing_resp.status_code == 200
     assert "Alice" in move_existing_resp.text
     face_rec = db.get_face(face_id)
@@ -402,7 +419,7 @@ def test_merge_people_and_clusters(test_env):
 
     emb = np.random.randn(512).astype(np.float32)
     f1 = db.insert_face(test_env["ids"][0], (0, 0, 10, 10), 0.9, emb, cluster_id=10, person_id=p1)
-    f2 = db.insert_face(test_env["ids"][1], (0, 0, 10, 10), 0.9, emb, cluster_id=11, person_id=p2)
+    db.insert_face(test_env["ids"][1], (0, 0, 10, 10), 0.9, emb, cluster_id=11, person_id=p2)
 
     # Merge p1 into p2
     resp = client.post(f"/api/people/{p1}/merge", data={"target_person_id": p2})
@@ -522,8 +539,15 @@ def test_already_named_faces_seeding_and_autotag(test_env):
     diana_emb = np.random.randn(512).astype(np.float32)
     diana_emb /= np.linalg.norm(diana_emb)
 
-    f_d1 = db.insert_face(test_env["ids"][0], (0, 0, 10, 10), 0.95, diana_emb, cluster_id=1, person_id=p_diana)
-    f_d2 = db.insert_face(test_env["ids"][1], (0, 0, 10, 10), 0.95, diana_emb + np.random.randn(512) * 0.01, cluster_id=1, person_id=p_diana)
+    db.insert_face(test_env["ids"][0], (0, 0, 10, 10), 0.95, diana_emb, cluster_id=1, person_id=p_diana)
+    db.insert_face(
+        test_env["ids"][1],
+        (0, 0, 10, 10),
+        0.95,
+        diana_emb + np.random.randn(512) * 0.01,
+        cluster_id=1,
+        person_id=p_diana,
+    )
 
     # Check that get_all_person_exemplars returns Diana's exemplars
     all_ex = db.get_all_person_exemplars()
@@ -532,7 +556,9 @@ def test_already_named_faces_seeding_and_autotag(test_env):
 
     # 2. Insert unassigned face that matches Diana
     diana_variant = diana_emb + np.random.randn(512) * 0.02
-    f_unassigned = db.insert_face(test_env["ids"][2], (0, 0, 10, 10), 0.95, diana_variant, cluster_id=-1, person_id=None)
+    f_unassigned = db.insert_face(
+        test_env["ids"][2], (0, 0, 10, 10), 0.95, diana_variant, cluster_id=-1, person_id=None
+    )
 
     # Run single-person auto-tag endpoint
     resp_autotag = client.post(f"/api/people/{p_diana}/autotag")
@@ -556,10 +582,10 @@ def test_already_named_faces_seeding_and_autotag(test_env):
 
 def test_pipeline_preserves_named_and_auto_tags_unassigned(tmp_path, monkeypatch):
     """Verify that run_pipeline uses existing named people exemplars to auto-tag matching faces."""
-    from PIL import Image
-    from app.pipeline import run_pipeline
+
     from app.db import Database
-    from unittest.mock import MagicMock
+    from app.pipeline import run_pipeline
+    from PIL import Image
 
     media_dir = tmp_path / "media"
     media_dir.mkdir()
@@ -574,7 +600,9 @@ def test_pipeline_preserves_named_and_auto_tags_unassigned(tmp_path, monkeypatch
     # Image 1 is already in library with Edward
     img1_path = media_dir / "edward_photo.jpg"
     Image.new("RGB", (100, 100), color="blue").save(img1_path)
-    img1_id = db.insert_image(str(img1_path.resolve()), 100, 100, file_size=img1_path.stat().st_size, mtime=img1_path.stat().st_mtime)
+    img1_id = db.insert_image(
+        str(img1_path.resolve()), 100, 100, file_size=img1_path.stat().st_size, mtime=img1_path.stat().st_mtime
+    )
     f_orig = db.insert_face(img1_id, (10, 10, 50, 50), 0.95, edward_emb, cluster_id=1, person_id=p_edward)
 
     # Image 2 is a new photo with 2 faces: one matching Edward, one stranger
@@ -594,6 +622,7 @@ def test_pipeline_preserves_named_and_auto_tags_unassigned(tmp_path, monkeypatch
     class MockDetector:
         def __init__(self, **kwargs):
             pass
+
         def detect(self, img_rgb):
             # Returns 2 faces for group photo
             return [MockFace((10, 10, 50, 50), 0.95), MockFace((60, 60, 100, 100), 0.92)]
@@ -601,6 +630,7 @@ def test_pipeline_preserves_named_and_auto_tags_unassigned(tmp_path, monkeypatch
     class MockEmbedder:
         def __init__(self, **kwargs):
             self.call_count = 0
+
         def extract_embedding(self, img_rgb, raw_face):
             self.call_count += 1
             if self.call_count % 2 == 1:
@@ -614,7 +644,7 @@ def test_pipeline_preserves_named_and_auto_tags_unassigned(tmp_path, monkeypatch
     monkeypatch.setattr("app.pipeline.FaceEmbedder", MockEmbedder)
 
     # Run the pipeline
-    stats = run_pipeline(
+    run_pipeline(
         input_dir=str(media_dir),
         db_path=str(db_file),
         cache_dir=str(tmp_path / "cache"),
@@ -754,6 +784,7 @@ def test_cluster_exemplar_matching_absorbs_orphan(tmp_path):
 
     # Exercise the Stage 4A2 path directly
     from app.recognition import MultiExemplarMatcher
+
     cluster_exemplars = db.get_all_cluster_exemplars(max_exemplars=5)
     orphan_faces = db.get_orphan_faces()
     matcher = MultiExemplarMatcher(cluster_exemplars)
@@ -767,7 +798,3 @@ def test_cluster_exemplar_matching_absorbs_orphan(tmp_path):
 
     assert db.get_face(f_match)["cluster_id"] == 7
     assert db.get_face(f_other)["cluster_id"] == -1
-
-
-
-

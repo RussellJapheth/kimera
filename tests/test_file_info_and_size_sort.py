@@ -1,13 +1,16 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Russell Japheth
+#
+# This file is part of Kimera. See the LICENSE file for details.
+
 import os
 import shutil
 import tempfile
-from pathlib import Path
-import pytest
-from fastapi.testclient import TestClient
 
-from app.db import Database, format_file_size, format_duration
-from app.scanner import get_video_duration
+import pytest
+from app.db import Database, format_duration, format_file_size
 from app.server import create_app
+from fastapi.testclient import TestClient
 
 
 def test_format_helpers():
@@ -108,7 +111,8 @@ def test_gallery_size_sort_and_file_info_routes():
         assert "File Size:" in modal_resp.text
         assert "Length:" in modal_resp.text
         assert "0:45" in modal_resp.text
-        assert "1920 × 1080 px" in modal_resp.text
+        # Multiplication sign is the deliberate rendered separator in the modal.
+        assert "1920 × 1080 px" in modal_resp.text  # noqa: RUF001
         assert "MP4 Video" in modal_resp.text
 
         # Test image modal
