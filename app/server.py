@@ -54,6 +54,8 @@ class ScanManager:
         algorithm: str = "agglomerative",
         min_interval_sec: float = 60.0,
         match_threshold: Optional[float] = None,
+        include_cluster_references: Optional[bool] = None,
+        intra_video_merge_threshold: Optional[float] = None,
     ) -> bool:
         with self._lock:
             if self.is_running:
@@ -70,7 +72,7 @@ class ScanManager:
 
         thread = threading.Thread(
             target=self._run_scan_thread,
-            args=(input_dir, conf_threshold, eps, min_samples, algorithm, min_interval_sec, match_threshold),
+            args=(input_dir, conf_threshold, eps, min_samples, algorithm, min_interval_sec, match_threshold, include_cluster_references, intra_video_merge_threshold),
             daemon=True,
         )
         thread.start()
@@ -96,6 +98,8 @@ class ScanManager:
         algorithm: str,
         min_interval_sec: float = 30.0,
         match_threshold: Optional[float] = None,
+        include_cluster_references: Optional[bool] = None,
+        intra_video_merge_threshold: Optional[float] = None,
     ) -> None:
         from app.pipeline import run_pipeline
         try:
@@ -109,6 +113,8 @@ class ScanManager:
                 clustering_algorithm=algorithm,
                 min_interval_sec=min_interval_sec,
                 match_threshold=match_threshold,
+                include_cluster_references=include_cluster_references,
+                intra_video_merge_threshold=intra_video_merge_threshold,
                 progress_callback=self._on_progress,
             )
             with self._lock:
@@ -733,6 +739,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         recognition_match_threshold: float = Form(0.42),
         similarity_threshold: float = Form(0.60),
         hide_low_quality_faces: str = Form(""),
+        include_cluster_references: str = Form(""),
+        intra_video_merge_threshold: float = Form(0.30),
     ):
         db.set_settings({
             "input_dir": input_dir,
@@ -744,6 +752,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             "recognition_match_threshold": str(recognition_match_threshold),
             "similarity_threshold": str(similarity_threshold),
             "hide_low_quality_faces": "1" if str(hide_low_quality_faces).lower() in ("1", "true", "on", "yes") else "",
+            "include_cluster_references": "1" if str(include_cluster_references).lower() in ("1", "true", "on", "yes") else "",
+            "intra_video_merge_threshold": str(intra_video_merge_threshold),
         })
         return HTMLResponse("""
             <div class="alert alert-success" style="background: rgba(16, 185, 129, 0.15); border: 1px solid #10b981; color: #6ee7b7; padding: 0.6rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.875rem;">
@@ -895,6 +905,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
         algorithm: str = Form("agglomerative"),
         min_interval_sec: float = Form(60.0),
         recognition_match_threshold: float = Form(0.42),
+        include_cluster_references: str = Form(""),
+        intra_video_merge_threshold: float = Form(0.30),
     ):
         if not Path(input_dir).exists():
             return HTMLResponse(
@@ -912,6 +924,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             "algorithm": algorithm,
             "min_interval_sec": str(min_interval_sec),
             "recognition_match_threshold": str(recognition_match_threshold),
+            "include_cluster_references": "1" if str(include_cluster_references).lower() in ("1", "true", "on", "yes") else "",
+            "intra_video_merge_threshold": str(intra_video_merge_threshold),
         })
 
         scan_mgr.start_scan(
@@ -922,6 +936,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: Optional[str] = Non
             algorithm=algorithm,
             min_interval_sec=min_interval_sec,
             match_threshold=recognition_match_threshold,
+            include_cluster_references=str(include_cluster_references).lower() in ("1", "true", "on", "yes"),
+            intra_video_merge_threshold=intra_video_merge_threshold,
         )
 
         return templates.TemplateResponse(

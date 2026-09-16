@@ -69,6 +69,87 @@ def select_k_medoids(embeddings: np.ndarray | List[np.ndarray], k: int = 5) -> L
     return [X_norm[idx] for idx in refined_indices]
 
 
+def group_intra_video(
+    video_faces: List[Dict[str, Any]],
+    threshold: float = 0.30,
+) -> List[Dict[str, Any]]:
+    """
+    Group near-identical faces found within the same video into merge components.
+
+    Faces are linked when their cosine distance is <= threshold. Components are
+    reported with their known identities so callers can resolve merges:
+
+        [{"persons": {person_id: count}, "clusters": {cluster_id: count},
+          "noise_ids": [face_id, ...]}, ...]
+
+    Named faces count toward "persons", faces already inside an unnamed cluster
+    count toward "clusters", and unassigned/unclustered faces are "noise".
+    Only components with 2+ faces are returned.
+    """
+    if not video_faces:
+        return []
+
+    by_image: Dict[int, List[Dict[str, Any]]] = {}
+    for f in video_faces:
+        by_image.setdefault(f["image_id"], []).append(f)
+
+    components: List[Dict[str, Any]] = []
+
+    for image_faces in by_image.values():
+        if len(image_faces) < 2:
+            continue
+
+        n = len(image_faces)
+        parent = list(range(n))
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a: int, b: int) -> None:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[rb] = ra
+
+        E = np.asarray([f["embedding"] for f in image_faces], dtype=np.float32)
+        if E.ndim == 1:
+            E = E.reshape(1, -1)
+        E_norm = normalize(E, norm="l2", axis=1)
+        sim_matrix = np.clip(np.matmul(E_norm, E_norm.T), -1.0, 1.0)
+        dist_matrix = 1.0 - sim_matrix
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                if float(dist_matrix[i, j]) <= threshold:
+                    union(i, j)
+
+        comps: Dict[int, Dict[str, Any]] = {}
+        for idx, f in enumerate(image_faces):
+            root = find(idx)
+            if root not in comps:
+                comps[root] = {"persons": {}, "clusters": {}, "noise_ids": []}
+            comp = comps[root]
+            if f.get("person_id") is not None:
+                pid = int(f["person_id"])
+                comp["persons"][pid] = comp["persons"].get(pid, 0) + 1
+                comp["noise_ids"].append(f["id"])
+            elif f.get("cluster_id", -1) >= 0:
+                cid = int(f["cluster_id"])
+                comp["clusters"][cid] = comp["clusters"].get(cid, 0) + 1
+                comp["noise_ids"].append(f["id"])
+            else:
+                comp["noise_ids"].append(f["id"])
+
+        for root, comp in comps.items():
+            count = len(comp["noise_ids"])
+            if count >= 2:
+                components.append(comp)
+
+    return components
+
+
 class MultiExemplarMatcher:
     """
     Fast matrix-based multi-exemplar matcher for face recognition.

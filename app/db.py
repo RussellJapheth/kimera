@@ -1415,6 +1415,123 @@ class Database:
                 })
             return results
 
+    def get_orphan_faces(self) -> List[Dict[str, Any]]:
+        """Retrieve unassigned faces that are not yet inside any cluster (cluster_id < 0)."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT f.id, f.image_id, f.box_x1, f.box_y1, f.box_x2, f.box_y2,
+                       f.confidence, f.embedding, f.cluster_id, i.file_path
+                FROM faces f
+                JOIN images i ON f.image_id = i.id
+                WHERE f.person_id IS NULL AND f.cluster_id < 0
+                ORDER BY f.id ASC
+            """)
+            rows = cursor.fetchall()
+            results = []
+            for r in rows:
+                results.append({
+                    "id": int(r["id"]),
+                    "image_id": int(r["image_id"]),
+                    "bbox": (int(r["box_x1"]), int(r["box_y1"]), int(r["box_x2"]), int(r["box_y2"])),
+                    "confidence": float(r["confidence"]),
+                    "embedding": self.deserialize_embedding(r["embedding"]),
+                    "cluster_id": int(r["cluster_id"]),
+                    "person_id": None,
+                    "file_path": r["file_path"],
+                })
+            return results
+
+    def get_all_cluster_exemplars(self, max_exemplars: int = 5) -> Dict[int, List[np.ndarray]]:
+        """
+        Retrieve multi-exemplar embeddings for all unnamed clusters (cluster_id >= 0, person_id IS NULL).
+        Returns {cluster_id: [exemplar_vec1, ...]}.
+        """
+        from app.recognition import select_k_medoids
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT cluster_id, embedding
+                FROM faces
+                WHERE cluster_id >= 0 AND person_id IS NULL
+                ORDER BY cluster_id ASC, id ASC
+            """)
+            cluster_embeddings: Dict[int, List[np.ndarray]] = {}
+            for r in cursor.fetchall():
+                cid = int(r["cluster_id"])
+                emb = self.deserialize_embedding(r["embedding"])
+                if cid not in cluster_embeddings:
+                    cluster_embeddings[cid] = []
+                cluster_embeddings[cid].append(emb)
+
+            exemplars: Dict[int, List[np.ndarray]] = {}
+            for cid, embs in cluster_embeddings.items():
+                exemplars[cid] = select_k_medoids(embs, k=max_exemplars)
+
+            return exemplars
+
+    def assign_faces_to_cluster(self, face_ids: List[int], cluster_id: int) -> None:
+        """Batch assign a list of face IDs to an existing cluster."""
+        if not face_ids:
+            return
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            placeholders = ",".join("?" for _ in face_ids)
+            cursor.execute(
+                f"UPDATE faces SET cluster_id = ? WHERE id IN ({placeholders})",
+                [int(cluster_id)] + [int(fid) for fid in face_ids],
+            )
+
+    def get_video_faces_for_merge(self) -> List[Dict[str, Any]]:
+        """Get faces from video media for intra-video merge pass. Named faces included as anchor identities."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT f.id, f.image_id, f.embedding, f.person_id, f.cluster_id, i.file_path
+                FROM faces f
+                JOIN images i ON f.image_id = i.id
+                ORDER BY f.image_id ASC, f.id ASC
+            """)
+            rows = []
+            for r in cursor.fetchall():
+                fp = r["file_path"]
+                if not fp or Path(fp).suffix.lower() not in VIDEO_EXTENSIONS:
+                    continue
+                rows.append({
+                    "id": int(r["id"]),
+                    "image_id": int(r["image_id"]),
+                    "embedding": self.deserialize_embedding(r["embedding"]),
+                    "person_id": int(r["person_id"]) if r["person_id"] is not None else None,
+                    "cluster_id": int(r["cluster_id"]),
+                })
+            return rows
+
+    def get_face_ids_by_clusters(self, cluster_ids: List[int]) -> Dict[int, List[int]]:
+        """Return {cluster_id: [face_ids]} for all faces in the given unnamed clusters."""
+        if not cluster_ids:
+            return {}
+        result: Dict[int, List[int]] = {}
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            placeholders = ",".join("?" for _ in cluster_ids)
+            cursor.execute(
+                f"SELECT cluster_id, id FROM faces WHERE cluster_id IN ({placeholders}) AND person_id IS NULL ORDER BY id ASC",
+                [int(cid) for cid in cluster_ids],
+            )
+            for r in cursor.fetchall():
+                cid = int(r["cluster_id"])
+                result.setdefault(cid, []).append(int(r["id"]))
+        return result
+
+    def get_max_cluster_id(self) -> int:
+        """Return the current max cluster_id, or -1 if none."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT MAX(cluster_id) as mc FROM faces")
+            row = cursor.fetchone()
+            return int(row["mc"]) if row and row["mc"] is not None else -1
+
     def assign_faces_to_person(self, face_ids: List[int], person_id: int) -> None:
         """Batch assign a list of face IDs to a person."""
         if not face_ids:

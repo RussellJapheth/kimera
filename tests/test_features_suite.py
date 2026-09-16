@@ -644,5 +644,130 @@ def test_pipeline_preserves_named_and_auto_tags_unassigned(tmp_path, monkeypatch
     assert stranger_faces_in_img2[0]["cluster_id"] >= 0
 
 
+def test_intra_video_merge_grouping(tmp_path):
+    """Verify group_intra_video links near-identical faces in the same video but not different people."""
+    from app.db import Database
+    from app.recognition import group_intra_video
+
+    db = Database(tmp_path / "merge.db")
+    rng = np.random.default_rng(7)
+
+    def vec(base, noise=0.03):
+        v = base + rng.standard_normal(128).astype(np.float32) * noise
+        v /= np.linalg.norm(v)
+        return v
+
+    alice = rng.standard_normal(128).astype(np.float32)
+    alice /= np.linalg.norm(alice)
+    bob = rng.standard_normal(128).astype(np.float32)
+    bob /= np.linalg.norm(bob)
+    alice_a, alice_b = vec(alice), vec(alice)
+    bob_a, bob_b = vec(bob), vec(bob)
+
+    vid = db.insert_image(str(tmp_path / "clip.mp4"), 400, 300, 1000, 1, "h", duration=120.0)
+    f_alice_a = db.insert_face(vid, (0, 0, 10, 10), 0.95, alice_a, cluster_id=-1)
+    f_alice_b = db.insert_face(vid, (10, 10, 20, 20), 0.95, alice_b, cluster_id=-1)
+    f_bob_a = db.insert_face(vid, (20, 20, 30, 30), 0.95, bob_a, cluster_id=-1)
+    f_bob_b = db.insert_face(vid, (30, 30, 40, 40), 0.95, bob_b, cluster_id=-1)
+
+    comps = group_intra_video(db.get_video_faces_for_merge(), threshold=0.30)
+
+    # Two separate components, each exactly the matched pair
+    components_as_sets = [set(c["noise_ids"]) for c in comps]
+    assert {f_alice_a, f_alice_b} in components_as_sets
+    assert {f_bob_a, f_bob_b} in components_as_sets
+    # Alice and Bob components must NOT be merged together
+    assert not any(f_alice_a in s and f_bob_a in s for s in components_as_sets)
+
+
+def test_intra_video_merge_noise_grouped_into_cluster(tmp_path):
+    """Verify run_intra_video_merge groups near-identical noise faces into one new cluster."""
+    from app.db import Database
+    from app.pipeline import run_intra_video_merge
+
+    db = Database(tmp_path / "merge.db")
+    rng = np.random.default_rng(9)
+
+    base = rng.standard_normal(128).astype(np.float32)
+    base /= np.linalg.norm(base)
+
+    def vec(noise=0.02):
+        v = base + rng.standard_normal(128).astype(np.float32) * noise
+        v /= np.linalg.norm(v)
+        return v
+
+    vid = db.insert_image(str(tmp_path / "clip.mp4"), 400, 300, 1000, 1, "h", duration=120.0)
+    f1 = db.insert_face(vid, (0, 0, 10, 10), 0.95, vec(), cluster_id=-1)
+    f2 = db.insert_face(vid, (10, 10, 20, 20), 0.95, vec(), cluster_id=-1)
+
+    run_intra_video_merge(db, threshold=0.30)
+
+    face1 = db.get_face(f1)
+    face2 = db.get_face(f2)
+    assert face1["cluster_id"] == face2["cluster_id"] >= 0
+
+
+def test_intra_video_merge_promotes_to_named_person(tmp_path):
+    """Verify a near-identical unnamed video face is merged into a named person."""
+    from app.db import Database
+    from app.pipeline import run_intra_video_merge
+
+    db = Database(tmp_path / "merge.db")
+    rng = np.random.default_rng(11)
+
+    alice = rng.standard_normal(128).astype(np.float32)
+    alice /= np.linalg.norm(alice)
+
+    pid = db.name_person("Alice")
+    vid = db.insert_image(str(tmp_path / "clip.mp4"), 400, 300, 1000, 1, "h", duration=120.0)
+    db.insert_face(vid, (0, 0, 10, 10), 0.95, alice, cluster_id=1, person_id=pid)
+    f_video = db.insert_face(vid, (10, 10, 20, 20), 0.95, alice, cluster_id=-1)
+
+    run_intra_video_merge(db, threshold=0.99)
+
+    assert db.get_face(f_video)["person_id"] == pid
+
+
+def test_cluster_exemplar_matching_absorbs_orphan(tmp_path):
+    """Verify orphan faces match existing unnamed clusters and merge into them."""
+    from app.db import Database
+
+    db = Database(tmp_path / "match.db")
+    rng = np.random.default_rng(13)
+
+    base = rng.standard_normal(128).astype(np.float32)
+    base /= np.linalg.norm(base)
+    variant = base + rng.standard_normal(128).astype(np.float32) * 0.01
+    variant /= np.linalg.norm(variant)
+    stranger = rng.standard_normal(128).astype(np.float32)
+    stranger /= np.linalg.norm(stranger)
+
+    img = db.insert_image(str(tmp_path / "photo.jpg"), 400, 300, 900, 1, "h")
+
+    # Existing unnamed cluster (identity 7)
+    db.insert_face(img, (0, 0, 5, 5), 0.95, base, cluster_id=7)
+    db.insert_face(img, (5, 5, 10, 10), 0.95, variant, cluster_id=7)
+
+    # Unclustered orphans
+    f_match = db.insert_face(img, (20, 20, 30, 30), 0.95, base, cluster_id=-1)
+    f_other = db.insert_face(img, (40, 40, 50, 50), 0.95, stranger, cluster_id=-1)
+
+    # Exercise the Stage 4A2 path directly
+    from app.recognition import MultiExemplarMatcher
+    cluster_exemplars = db.get_all_cluster_exemplars(max_exemplars=5)
+    orphan_faces = db.get_orphan_faces()
+    matcher = MultiExemplarMatcher(cluster_exemplars)
+    matches = matcher.match_faces_batch(orphan_faces, threshold=0.42)
+    assert f_match in matches
+    assert matches[f_match][0] == 7
+    assert f_other not in matches
+
+    for f_id, (c_id, _dist) in matches.items():
+        db.assign_faces_to_cluster([f_id], c_id)
+
+    assert db.get_face(f_match)["cluster_id"] == 7
+    assert db.get_face(f_other)["cluster_id"] == -1
+
+
 
 

@@ -121,6 +121,8 @@ def main(args: list[str] | None = None) -> int:
     scan_parser.add_argument("--scene-thresh", type=float, default=0.35, help="Video scene cut threshold (0.0 - 1.0, default: 0.35)")
     scan_parser.add_argument("--min-interval", type=float, default=60.0, help="Minimum seconds between video keyframes (default: 60.0)")
     scan_parser.add_argument("--max-interval", type=float, default=90.0, help="Maximum seconds between video keyframe samples (default: 90.0)")
+    scan_parser.add_argument("--no-cluster-refs", action="store_true", help="Do not use unnamed clusters as matching references")
+    scan_parser.add_argument("--intra-merge-threshold", type=float, default=None, help="Cosine distance for intra-video face merge (lower = stricter, default: 0.30)")
 
     # Inspect subcommand
     inspect_parser = subparsers.add_parser("inspect", help="Inspect a specific person/cluster")
@@ -156,6 +158,8 @@ def main(args: list[str] | None = None) -> int:
             scene_threshold=parsed.scene_thresh,
             min_interval_sec=parsed.min_interval,
             max_interval_sec=parsed.max_interval,
+            include_cluster_references=False if parsed.no_cluster_refs else None,
+            intra_video_merge_threshold=parsed.intra_merge_threshold,
         )
         print_summary(stats)
         return 0

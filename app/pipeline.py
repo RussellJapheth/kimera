@@ -8,14 +8,14 @@ import concurrent.futures
 import queue
 import threading
 from pathlib import Path
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Set, Tuple
 import numpy as np
 from tqdm import tqdm
 
 from app.clustering import cluster_embeddings
 from app.db import Database
 from app.models import FaceDetector, FaceEmbedder, get_media_embedder
-from app.recognition import MultiExemplarMatcher
+from app.recognition import MultiExemplarMatcher, group_intra_video
 from app.scanner import (
     compute_quick_hash,
     extract_video_keyframes,
@@ -134,6 +134,51 @@ def _prefilter_file(
     )
 
 
+def run_intra_video_merge(db: Database, threshold: float = 0.30) -> None:
+    """Merge near-identical faces found within the same video so angle/lighting
+    variation does not split one person into multiple identities.
+
+    Resolution rules per linked component:
+    - Single named person: promote the whole component to that person.
+    - Multiple named people: ambiguous, skip.
+    - Existing clusters only: merge into the most common cluster.
+    - Noise only: group into a fresh cluster.
+    """
+    video_faces = db.get_video_faces_for_merge()
+    if not video_faces:
+        return
+
+    components = group_intra_video(video_faces, threshold=threshold)
+    if not components:
+        return
+
+    all_cids: Set[int] = set()
+    for comp in components:
+        all_cids.update(comp["clusters"].keys())
+    member_map = db.get_face_ids_by_clusters(sorted(all_cids)) if all_cids else {}
+
+    next_cluster_id = db.get_max_cluster_id()
+    for comp in components:
+        if len(comp["persons"]) == 1:
+            person_id = max(comp["persons"].items(), key=lambda kv: (kv[1], -kv[0]))[0]
+            merge_ids = list(comp["noise_ids"])
+            for cid in comp["clusters"]:
+                merge_ids.extend(member_map.get(cid, []))
+            db.assign_faces_to_person(merge_ids, person_id)
+        elif len(comp["persons"]) > 1:
+            continue
+        elif comp["clusters"]:
+            target_cid = max(comp["clusters"].items(), key=lambda kv: (kv[1], kv[0]))[0]
+            merge_ids = list(comp["noise_ids"])
+            for cid in comp["clusters"]:
+                if cid != target_cid:
+                    merge_ids.extend(member_map.get(cid, []))
+            db.assign_faces_to_cluster(merge_ids, target_cid)
+        else:
+            next_cluster_id += 1
+            db.assign_faces_to_cluster(comp["noise_ids"], next_cluster_id)
+
+
 def run_pipeline(
     input_dir: Path | str,
     db_path: Path | str = "face_clusters.db",
@@ -147,6 +192,8 @@ def run_pipeline(
     min_interval_sec: float = 60.0,
     max_interval_sec: float = 90.0,
     match_threshold: Optional[float] = None,
+    include_cluster_references: Optional[bool] = None,
+    intra_video_merge_threshold: Optional[float] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     """
@@ -402,6 +449,16 @@ def run_pipeline(
         if match_threshold is not None
         else float(db.get_setting("recognition_match_threshold", eps))
     )
+    effective_include_cluster_refs = (
+        include_cluster_references
+        if include_cluster_references is not None
+        else db.get_setting("include_cluster_references", "1") == "1"
+    )
+    effective_intra_video_threshold = (
+        float(intra_video_merge_threshold)
+        if intra_video_merge_threshold is not None
+        else float(db.get_setting("intra_video_merge_threshold", 0.30))
+    )
 
     person_exemplars = db.get_all_person_exemplars(max_exemplars=5)
     unassigned_faces = db.get_unassigned_faces()
@@ -425,6 +482,27 @@ def run_pipeline(
             for p_id, f_ids in person_to_faces.items():
                 db.assign_faces_to_person(f_ids, p_id)
 
+    # Stage 4A2: Match orphan faces (unclustered) against existing unnamed clusters,
+    # so known-but-unnamed faces act as references too. Matches merge into the cluster.
+    if effective_include_cluster_refs:
+        notify_progress("Matching orphan faces against existing clusters...", 94, total_media, total_media)
+        cluster_exemplars = db.get_all_cluster_exemplars(max_exemplars=5)
+        orphan_faces = db.get_orphan_faces()
+        if cluster_exemplars and orphan_faces:
+            cluster_matcher = MultiExemplarMatcher(cluster_exemplars)
+            cluster_matches = cluster_matcher.match_faces_batch(
+                orphan_faces,
+                threshold=effective_match_threshold,
+            )
+            cluster_to_faces: Dict[int, List[int]] = {}
+            for f_id, (c_id, _dist) in cluster_matches.items():
+                if c_id not in cluster_to_faces:
+                    cluster_to_faces[c_id] = []
+                cluster_to_faces[c_id].append(f_id)
+
+            for c_id, f_ids in cluster_to_faces.items():
+                db.assign_faces_to_cluster(f_ids, c_id)
+
     # Stage 4B: Unsupervised clustering on remaining unassigned faces
     notify_progress("Clustering remaining unassigned faces...", 96, total_media, total_media)
     remaining_unassigned = db.get_unassigned_faces()
@@ -438,6 +516,11 @@ def run_pipeline(
             algorithm=clustering_algorithm,
         )
         db.update_face_clusters(all_unassigned_ids, cluster_labels)
+
+    # Stage 4C: Intra-video merge. Group near-identical faces from the same video
+    # so angle/lighting variation does not split one person into multiple identities.
+    notify_progress("Merging similar faces within videos...", 97, total_media, total_media)
+    run_intra_video_merge(db, threshold=effective_intra_video_threshold)
 
     # Export cutouts if requested
     if export_dir:
