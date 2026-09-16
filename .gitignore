@@ -19,3 +19,8 @@ pictures/
 results/
 scratch/
 scratch_*/
+
+# Local-only personal launcher & internal analysis docs
+start.sh
+structure.md
+structure.pdf

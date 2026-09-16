@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Kimera launcher.
+# Copy to start.sh, set MEDIA_DIR (or export it), then run: ./start.sh
+
+export OPENCV_LOG_LEVEL=OFF
+export OPENCV_FFMPEG_LOGLEVEL=-8
+
+MEDIA_DIR="${MEDIA_DIR:-/absolute/path/to/media}"
+HOST="${HOST:-0.0.0.0}"
+PORT="${PORT:-8000}"
+
+python -m app serve "$MEDIA_DIR" --host "$HOST" --port "$PORT"
