@@ -1854,6 +1854,78 @@ body {
   color: var(--text-main);
 }
 
+.rec-refresh-btn {
+  padding: 0.4rem 0.85rem;
+  font-size: 0.8125rem;
+  display: inline-flex;
+  align-items: center;
+}
+
+.recommend-rating {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.45rem 0.6rem;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.rec-rate-btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  padding: 0.32rem 0.4rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.rec-rate-btn:hover {
+  color: var(--text-main);
+  border-color: rgba(99, 102, 241, 0.5);
+}
+
+.rec-rate-btn.active {
+  color: #6ee7b7;
+  border-color: rgba(16, 185, 129, 0.5);
+  background: rgba(16, 185, 129, 0.12);
+}
+
+.rec-rate-dislike.active {
+  color: #fca5a5;
+  border-color: rgba(239, 68, 68, 0.5);
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.rec-rate-clear {
+  flex: 0 0 auto;
+  padding: 0.32rem 0.4rem;
+}
+
+.recommend-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 3rem 1.5rem;
+  text-align: center;
+  color: var(--text-dim);
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.recommend-empty p {
+  margin: 0;
+  max-width: 420px;
+  font-size: 0.875rem;
+}
+
 /* ==================== TRASH ==================== */
 .trash-actions {
   border-top: 1px solid var(--border-subtle);

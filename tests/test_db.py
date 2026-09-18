@@ -224,6 +224,41 @@ def test_watch_events_and_recommendations(temp_db: Database):
     assert all(r["id"] != vid1 for r in recs2)
 
 
+def test_recommendation_feedback_upsert_and_clear(temp_db: Database):
+    vid = temp_db.insert_image("/path/to/v1.mp4", duration=5.0)
+
+    # Like then re-rate to dislike (latest rating wins)
+    temp_db.set_recommendation_feedback(vid, 1)
+    assert temp_db.get_recommendation_feedback() == {vid: 1}
+
+    temp_db.set_recommendation_feedback(vid, -1)
+    assert temp_db.get_recommendation_feedback() == {vid: -1}
+
+    # Rating 0 clears the feedback row entirely
+    temp_db.set_recommendation_feedback(vid, 0)
+    assert temp_db.get_recommendation_feedback() == {}
+
+
+def test_recommendation_feedback_steers_ranking(temp_db: Database):
+    vid_a = temp_db.insert_image("/path/to/a.mp4", duration=5.0)
+    temp_db.insert_image("/path/to/b.mp4", duration=5.0)
+    temp_db.insert_image("/path/to/c.mp4", duration=5.0)
+
+    temp_db.record_watch_event(vid_a, "view")
+
+    # Disliked video drops behind equally-newer candidates
+    temp_db.set_recommendation_feedback(vid_a, -1)
+    recs = temp_db.get_recommended_videos(limit=10)
+    ranked_ids = [r["id"] for r in recs]
+    assert ranked_ids.index(vid_a) == len(ranked_ids) - 1
+    assert next(r for r in recs if r["id"] == vid_a)["rating"] == -1
+
+    # Liking a video lifts it to the top once feedback is cleared elsewhere
+    temp_db.set_recommendation_feedback(vid_a, 1)
+    recs = temp_db.get_recommended_videos(limit=10)
+    assert recs[0]["id"] == vid_a
+
+
 def test_trash_and_restore_db_layer(temp_db: Database):
     img = temp_db.insert_image("/path/to/trashme.jpg")
     temp_db.move_to_trash([img])

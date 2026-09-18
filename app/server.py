@@ -525,24 +525,6 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: str | None = None) 
         active_tab = "favorites" if filter == "favorites" else "photos"
         all_tags = db.get_all_tags()
 
-        # Recommendations only on the unfiltered library overview
-        recommendations = []
-        if (
-            filter == "all"
-            and not search
-            and not active_tag_ids
-            and person_id is None
-            and cluster_id is None
-            and folder_path is None
-            and similar_to is None
-        ):
-            try:
-                recommendations = db.get_recommended_videos(limit=12, exclude_duplicates=exclude_duplicates)
-            # Recommendations are optional; never block the gallery on them.
-            except Exception:
-                logger.debug("recommendations failed", exc_info=True)
-                recommendations = []
-
         # If cluster_id is specified, fetch cluster info for top rename banner
         cluster_info = None
         if cluster_id is not None:
@@ -611,7 +593,6 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: str | None = None) 
                 "tag_ids_str": tag_ids_str,
                 "all_tags": all_tags,
                 "seed": seed,
-                "recommendations": recommendations,
             },
         )
 
@@ -745,8 +726,47 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: str | None = None) 
             },
         )
 
+    @app.get("/recommendations", response_class=HTMLResponse)
+    async def recommendations_view(request: Request):
+        exclude_duplicates = db.get_setting("exclude_duplicates") == "1"
+        recommendations = []
+        try:
+            recommendations = db.get_recommended_videos(limit=12, exclude_duplicates=exclude_duplicates)
+        # Recommendations are optional; never block the page on them.
+        except Exception:
+            logger.debug("recommendations failed", exc_info=True)
+            recommendations = []
+        return templates.TemplateResponse(
+            request=request,
+            name="recommendations.html",
+            context={
+                "recommendations": recommendations,
+                "active_page": "recommendations",
+            },
+        )
+
     @app.get("/partials/recommendations", response_class=HTMLResponse)
     async def recommendations_partial(request: Request):
+        exclude_duplicates = db.get_setting("exclude_duplicates") == "1"
+        try:
+            recommendations = db.get_recommended_videos(limit=12, exclude_duplicates=exclude_duplicates)
+        # Recommendations are optional; never block the gallery on them.
+        except Exception:
+            logger.debug("recommendations failed", exc_info=True)
+            recommendations = []
+        return templates.TemplateResponse(
+            request=request,
+            name="partials/recommendations.html",
+            context={"recommendations": recommendations},
+        )
+
+    @app.post("/api/recommendations/{image_id}/rate", response_class=HTMLResponse)
+    async def rate_recommendation(request: Request, image_id: int, rating: str = Form("like")):
+        """Record explicit like/dislike feedback and return refreshed picks."""
+        rating_value = {"like": 1, "dislike": -1, "clear": 0}.get(rating, 1)
+        db.set_recommendation_feedback(image_id, rating_value)
+        if rating_value > 0:
+            db.record_watch_event(image_id, event_type="like")
         exclude_duplicates = db.get_setting("exclude_duplicates") == "1"
         try:
             recommendations = db.get_recommended_videos(limit=12, exclude_duplicates=exclude_duplicates)
@@ -1224,12 +1244,57 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: str | None = None) 
             seed=seed,
         )
 
+        # After a tag/person change the current image may no longer match the
+        # active filter. Fall back to unfiltered navigation so the lightbox
+        # never shows a "-1 / N" counter or dead swiping.
+        if adj["current_index"] == -1 and any(
+            [search, person_id is not None, cluster_id is not None, folder_path, similar_to is not None, active_tag_ids]
+        ):
+            adj = db.get_adjacent_image_ids(
+                image_id=image_id,
+                filter_type="all",
+                search=None,
+                person_id=None,
+                cluster_id=None,
+                folder_path=None,
+                folder_direct_only=False,
+                similar_to=None,
+                threshold=None,
+                tag_ids=None,
+                sort_by=sort_by,
+                sort_order=sort_order,
+                exclude_duplicates=db.get_setting("exclude_duplicates") == "1",
+                seed=seed,
+            )
+            filter_type = "all"
+            search = None
+            person_id = None
+            cluster_id = None
+            folder_path = None
+            similar_to = None
+            threshold = None
+            active_tag_ids = []
+
         try:
             suggested_tags = db.suggest_tags_for_image(image_id, top_k=6, min_score=0.50)
         # Suggested tags are optional decoration.
         except Exception:
             logger.debug("suggest_tags failed for image %s", image_id, exc_info=True)
             suggested_tags = []
+
+        modal_ctx = {
+            "filter_type": filter_type,
+            "search": search,
+            "person_id": person_id,
+            "cluster_id": cluster_id,
+            "folder_path": folder_path,
+            "similar_to": similar_to,
+            "threshold": threshold,
+            "sort_by": sort_by,
+            "sort_order": sort_order,
+            "ctx_tag_ids": ",".join(str(tid) for tid in active_tag_ids),
+            "seed": seed,
+        }
 
         return templates.TemplateResponse(
             request=request,
@@ -1252,19 +1317,9 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: str | None = None) 
                 "tag_id": tag_id,
                 "seed": seed,
                 "suggested_tags": suggested_tags,
-                "modal_ctx": {
-                    "filter_type": filter_type,
-                    "search": search,
-                    "person_id": person_id,
-                    "cluster_id": cluster_id,
-                    "folder_path": folder_path,
-                    "similar_to": similar_to,
-                    "threshold": threshold,
-                    "sort_by": sort_by,
-                    "sort_order": sort_order,
-                    "ctx_tag_ids": ",".join(str(tid) for tid in active_tag_ids),
-                    "seed": seed,
-                },
+                # Exclude None values: hx-vals serializes them as the literal
+                # string "null", which breaks FastAPI form validation (422).
+                "modal_ctx": {k: v for k, v in modal_ctx.items() if v is not None},
             },
         )
 
@@ -1383,7 +1438,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: str | None = None) 
                         "folder_path": folder_path,
                         "sort_by": sort_by,
                         "sort_order": sort_order,
-                        "ctx_tag_ids": (str(ctx_tag_id) if ctx_tag_id is not None else ""),
+                        "ctx_tag_ids": ctx_tag_ids
+                        or (str(ctx_tag_id) if ctx_tag_id is not None else ""),
                     }.items()
                     if v is not None
                 },

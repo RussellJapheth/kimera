@@ -202,6 +202,14 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_watch_events_image ON watch_events(image_id);
                 CREATE INDEX IF NOT EXISTS idx_watch_events_time ON watch_events(watched_at);
+
+                CREATE TABLE IF NOT EXISTS recommendation_feedback (
+                    image_id INTEGER PRIMARY KEY,
+                    rating INTEGER NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_recommendation_feedback_rating ON recommendation_feedback(rating);
             """)
 
             cursor.execute("PRAGMA table_info(images)")
@@ -1815,6 +1823,34 @@ class Database:
                 (int(image_id), event_type),
             )
 
+    def set_recommendation_feedback(self, image_id: int, rating: int) -> None:
+        """Record explicit user feedback on a recommendation.
+
+        rating: +1 = liked, -1 = disliked, 0 = clear previous feedback.
+        """
+        image_id = int(image_id)
+        with self._get_connection() as conn:
+            if rating == 0:
+                conn.execute("DELETE FROM recommendation_feedback WHERE image_id = ?", (image_id,))
+                return
+            conn.execute(
+                """
+                INSERT INTO recommendation_feedback (image_id, rating, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(image_id) DO UPDATE SET
+                    rating = excluded.rating,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (image_id, 1 if rating > 0 else -1),
+            )
+
+    def get_recommendation_feedback(self) -> dict[int, int]:
+        """Return {image_id: rating} for all explicit recommendation feedback."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT image_id, rating FROM recommendation_feedback")
+            return {int(r["image_id"]): int(r["rating"]) for r in cursor.fetchall()}
+
     def get_recommended_videos(self, limit: int = 12, exclude_duplicates: bool = False) -> list[dict[str, Any]]:
         """
         Recommend videos using learned watch behaviour: recency, time-of-day
@@ -1873,6 +1909,31 @@ class Database:
         if content_centroid is not None and cen_weight_sum > 0:
             content_centroid /= cen_weight_sum
 
+        # Explicit like/dislike feedback steers the content centroid: liked
+        # videos pull suggestions toward their content, disliked ones push it
+        # away so the app learns from user feedback.
+        feedback = self.get_recommendation_feedback()
+        liked_ids = {iid for iid, r in feedback.items() if r > 0}
+        disliked_ids = {iid for iid, r in feedback.items() if r < 0}
+        feedback_centroid: np.ndarray | None = None
+        fb_weight_sum = 0.0
+        for iid, rating in feedback.items():
+            emb = all_embs.get(iid)
+            if emb is None:
+                continue
+            fb = emb.astype(np.float64) * (1.0 if rating > 0 else -0.9)
+            if feedback_centroid is None:
+                feedback_centroid = np.zeros_like(fb)
+            feedback_centroid += fb
+            fb_weight_sum += 1.0
+        if feedback_centroid is not None and fb_weight_sum > 0:
+            feedback_centroid /= fb_weight_sum
+        if feedback_centroid is not None:
+            if content_centroid is None:
+                content_centroid = feedback_centroid
+            else:
+                content_centroid = 0.6 * content_centroid + 0.4 * feedback_centroid
+
         def _parse_hour(watched_at: str) -> int:
             try:
                 return int(watched_at.split(" ", maxsplit=1)[1].split(":", maxsplit=1)[0]) if " " in watched_at else 0
@@ -1919,13 +1980,21 @@ class Database:
                 content_score = float(np.dot(cd / norm_c, emb / norm_e))
                 content_score = max(0.0, min(1.0, (content_score + 1.0) / 2.0))
 
-            score = fav_boost * 2.0 + watch_boost * 3.0 + time_boost * 2.0 + content_score * 4.0
+            # Explicit feedback dominates: likes strongly boost, dislikes sink
+            explicit_boost = 0.0
+            if vid in liked_ids:
+                explicit_boost += 14.0
+            if vid in disliked_ids:
+                explicit_boost -= 25.0
+
+            score = fav_boost * 2.0 + watch_boost * 3.0 + time_boost * 2.0 + content_score * 4.0 + explicit_boost
             scored.append({"image": img, "score": score})
 
         scored.sort(key=lambda x: x["score"], reverse=True)
         ranked = [s["image"] for s in scored[:limit]]
         for img in ranked:
             img.setdefault("face_count", 0)
+            img["rating"] = feedback.get(img["id"], 0)
         return ranked
 
     def clone_image_record(self, source_image_id: int, new_path: str) -> int | None:

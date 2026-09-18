@@ -362,3 +362,87 @@ def test_photo_modal_context_and_folder_link(test_env):
     p_id = db.name_person(name="Alice", cluster_id=0)
     resp_person = client.get(f"/api/photos/{id1}/modal?person_id={p_id}")
     assert resp_person.status_code == 200
+
+
+def test_modal_ctx_has_no_null_values(test_env):
+    """hx-vals JSON must not contain null/None keys (they break FastAPI forms)."""
+    import json
+
+    db = test_env["db"]
+    id1 = test_env["id1"]
+    tid = db.add_tag("beach")
+    db.add_tags_to_image(id1, ["beach"])
+
+    app = create_app(db_path=str(test_env["db_file"]), cache_dir=str(test_env["cache_dir"]))
+    client = TestClient(app)
+
+    resp = client.get(f"/api/photos/{id1}/modal?tag_ids={tid}")
+    assert resp.status_code == 200
+    # The hx-vals payload parses as valid JSON with no null members
+    hx_vals_payloads = []
+    for m in resp.text.split("hx-vals='"):
+        if m.startswith("{"):
+            hx_vals_payloads.append(json.loads(m.split("'")[0]))
+    assert len(hx_vals_payloads) >= 1
+    for payload in hx_vals_payloads:
+        assert all(v is not None for v in payload.values())
+
+
+def test_tag_remove_updates_modal_and_falls_back(test_env):
+    """Removing a tag re-renders the lightbox without 422 or a -1 counter."""
+    db = test_env["db"]
+    id1 = test_env["id1"]
+    test_env["id2"]
+    tid = db.add_tag("beach")
+    db.add_tags_to_image(id1, ["beach"])
+    assert tid is not None
+
+    app = create_app(db_path=str(test_env["db_file"]), cache_dir=str(test_env["cache_dir"]))
+    client = TestClient(app)
+
+    # Modal with the active tag filter works
+    resp = client.get(f"/api/photos/{id1}/modal?tag_ids={tid}")
+    assert resp.status_code == 200
+    assert f"tags/{tid}/remove" in resp.text
+
+    # Removing the tag while it is the active filter: image drops out of the
+    # set, so the modal must fall back to unfiltered navigation (no -1).
+    ctx = {
+        "filter_type": "all",
+        "sort_by": "date",
+        "sort_order": "desc",
+        "ctx_tag_ids": str(tid),
+    }
+    resp = client.post(f"/api/photos/{id1}/tags/{tid}/remove", data=ctx)
+    assert resp.status_code == 200
+    assert db.get_image_tags(id1) == []
+    assert "setNeighbors(" in resp.text
+    assert " -1 /" not in resp.text
+    assert " / 2" in resp.text  # unfiltered fallback: both test images
+
+
+def test_recommendations_page_and_rating_endpoints(test_env):
+    """Recommendations page renders and rating endpoints persist feedback."""
+    db = test_env["db"]
+    vid = db.insert_image("/path/to/clip.mp4", duration=12.0)
+    test_env["id2"]
+
+    app = create_app(db_path=str(test_env["db_file"]), cache_dir=str(test_env["cache_dir"]))
+    client = TestClient(app)
+
+    resp = client.get("/recommendations")
+    assert resp.status_code == 200
+    assert "Recommended For You" in resp.text
+    assert f"/api/recommendations/{vid}/rate" in resp.text
+
+    resp_like = client.post(f"/api/recommendations/{vid}/rate", data={"rating": "like"})
+    assert resp_like.status_code == 200
+    assert db.get_recommendation_feedback()[vid] == 1
+
+    resp_dislike = client.post(f"/api/recommendations/{vid}/rate", data={"rating": "dislike"})
+    assert resp_dislike.status_code == 200
+    assert db.get_recommendation_feedback()[vid] == -1
+
+    resp_clear = client.post(f"/api/recommendations/{vid}/rate", data={"rating": "clear"})
+    assert resp_clear.status_code == 200
+    assert db.get_recommendation_feedback() == {}
