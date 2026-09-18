@@ -21,7 +21,7 @@ Kimera is a self-contained local media library and face-clustering application. 
 - recursively indexes and thumbnails the library (WebP cache with `ffmpeg` fallback),
 - detects every face and computes 512-dimensional ArcFace embeddings,
 - clusters faces into unnamed identity groups and watches for the same person across angles, lighting, photos, and videos,
-- and gives you a polished web gallery to review, name, merge, tag, and search everything.
+- and gives you a polished web gallery to review, name, merge, tag, search, shuffle, and trash files — plus a recommendation feed that learns which videos you like.
 
 Your media and your database never leave your machine. All model inference (face detection, face embedding, visual embedding) runs locally through ONNX Runtime.
 
@@ -41,8 +41,14 @@ Your media and your database never leave your machine. All model inference (face
 - **Photos & videos** — responsive grid, cached WebP thumbnails, inline video playback, lightbox viewer with face-detection overlays and EXIF metadata.
 - **People pages** — Google Photos–style face bubbles, avatar crops, inline naming, search, and person merging.
 - **Organize** — hierarchical folders (copy/move/batch-rename), one-click favorites, bulk select/action toolbar.
-- **Search & tags** — file/folder/person search, manual tag picker, automatic tag suggestions, and visual similarity search powered by CLIP vector embeddings.
+- **Search & tags** — file/folder/person search, manual tag picker, automatic tag suggestions, visual similarity search powered by CLIP vector embeddings, and **multi-tag filtering** to narrow the gallery by several tags at once.
+- **Seeded shuffle** — deterministic shuffle via a shareable seed so a given mixed-up order can be reproduced.
 - **Duplicate detection** — content-fingerprint scan with optional duplicate exclusion from the gallery.
+- **Trash bin** — soft-delete files to trash with one-click restore, plus permanent empty-trash from disk.
+
+### Smart video recommendations
+- **Learned recommendations** — a Recommendations page that surfaces videos using watch behaviour: recency, time-of-day affinity, favourites, and CLIP content similarity to recently watched clips.
+- **Explicit ratings** — like/dislike feedback steers future suggestions: liked videos pull similar content forward, disliked ones push it away.
 
 ### Local persistence
 - **SQLite** stores image metadata, dimensions, favorites, tags, face bounding boxes, binary embeddings, cluster assignments, and named people.
@@ -164,7 +170,7 @@ All settings are editable in the web UI (**Settings** page) and persisted in SQL
 │   ├── db.py            # SQLite schema, indices, CRUD & aggregation
 │   ├── server.py        # FastAPI web app & API routes
 │   ├── static/          # CSS, vendored JS, logo
-│   └── templates/       # Jinja2 templates (base, gallery, people, settings…)
+│   └── templates/       # Jinja2 templates (base, gallery, people, settings, trash, recommendations…)
 ├── tests/               # pytest suite (non-ML and API tests)
 ├── start.sh.example     # Launcher template (copy to start.sh, set MEDIA_DIR)
 ├── requirements.txt     # Pinned dependencies
