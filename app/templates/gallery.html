@@ -5,8 +5,8 @@
     {{ cluster_info.name }} - Kimera Gallery
   {% elif similar_to_image %}
     Similar to {{ similar_to_image.filename }} - Kimera Gallery
-  {% elif active_tag %}
-    Tag: {{ active_tag.name }} - Kimera Gallery
+  {% elif active_tags %}
+    {{ active_tags_str }} - Kimera Gallery
   {% elif filter_type == 'favorites' %}
     Favorites - Kimera Gallery
   {% elif search %}
@@ -17,6 +17,37 @@
 {% endblock %}
 
 {% block content %}
+{% if recommendations %}
+<div class="recommend-section">
+  <div class="recommend-header">
+    <div>
+      <h2 class="recommend-title">Recommended For You</h2>
+      <p class="recommend-subtitle">Smart picks based on your watch habits, favorites, and the current time</p>
+    </div>
+  </div>
+  <div class="recommend-reel" id="recommend-reel">
+    {% for image in recommendations %}
+      <div class="recommend-card">
+        <img src="/api/photos/{{ image.id }}/thumbnail" alt="{{ image.filename }}" loading="lazy" @click="openModal({{ image.id }})">
+        {% if image.is_video %}
+          <div class="video-play-indicator" @click="openModal({{ image.id }})">
+            <div class="video-play-icon">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                <polygon points="6 4 20 12 6 20 6 4"/>
+              </svg>
+            </div>
+          </div>
+        {% endif %}
+        <div class="recommend-card-meta">
+          <span class="card-info" title="{{ image.filename }}">{{ image.filename }}</span>
+          <span class="video-badge-label">{% if image.formatted_duration %}{{ image.formatted_duration }}{% endif %}</span>
+        </div>
+      </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
 <!-- Similar Media Filter Banner -->
 {% if similar_to_image %}
   <div style="margin-bottom: 1.5rem; background: linear-gradient(135deg, rgba(30, 41, 59, 0.85), rgba(15, 23, 42, 0.95)); border: 1px solid rgba(99, 102, 241, 0.4); border-radius: var(--radius-lg); padding: 1.25rem 1.5rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.4);">
@@ -100,8 +131,8 @@
         Photos of {{ cluster_info.name }}
       {% elif similar_to_image %}
         Similar to {{ similar_to_image.filename }}
-      {% elif active_tag %}
-        #{{ active_tag.name }}
+      {% elif active_tags %}
+        {{ active_tags_str }}
       {% elif filter_type == 'favorites' %}
         ⭐ Favorites
       {% elif search %}
@@ -115,12 +146,18 @@
 
   <div style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
     <div class="filter-pills">
-      <a href="/?sort={{ sort_by }}&order={{ sort_order }}" class="filter-pill {% if filter_type == 'all' and not search and not cluster_id and not active_tag %}active{% endif %}">All</a>
+      {% set active_set = active_tag_ids|list %}
+      <a href="/?sort={{ sort_by }}&order={{ sort_order }}" class="filter-pill {% if filter_type == 'all' and not search and not cluster_id and not active_tags %}active{% endif %}">All</a>
       <a href="/?filter=favorites&sort={{ sort_by }}&order={{ sort_order }}" class="filter-pill {% if filter_type == 'favorites' %}active{% endif %}">
         ⭐ Favorites
       </a>
       {% for tag in all_tags %}
-        <a href="/?tag_id={{ tag.id }}&sort={{ sort_by }}&order={{ sort_order }}" class="filter-pill {% if active_tag and active_tag.id == tag.id %}active{% endif %}">
+        {% if tag.id in active_set %}
+          {% set next_ids = active_set | reject('equalto', tag.id) | list %}
+        {% else %}
+          {% set next_ids = active_set + [tag.id] %}
+        {% endif %}
+        <a href="/?tag_ids={{ next_ids|join(',') }}&sort={{ sort_by }}&order={{ sort_order }}" class="filter-pill {% if tag.id in active_set %}active{% endif %}">
           #{{ tag.name }} <span style="opacity: 0.6; font-size: 0.7rem;">{{ tag.photo_count }}</span>
         </a>
       {% endfor %}
@@ -129,20 +166,29 @@
     <!-- Sort Controls -->
     <div class="sort-selector" style="display: flex; align-items: center; gap: 0.35rem; background: var(--surface-card); border: 1px solid var(--border-subtle); padding: 0.25rem 0.6rem; border-radius: var(--radius-full); font-size: 0.8125rem;">
       <span style="color: var(--text-dim);">Sort:</span>
-      <a href="?sort=date&order={% if sort_by == 'date' and sort_order == 'desc' %}asc{% else %}desc{% endif %}{% if filter_type != 'all' %}&filter={{ filter_type }}{% endif %}{% if search %}&search={{ search }}{% endif %}{% if cluster_id is not none %}&cluster_id={{ cluster_id }}{% endif %}{% if active_tag %}&tag_id={{ active_tag.id }}{% endif %}" class="sort-link {% if sort_by == 'date' %}active{% endif %}">
+      <a href="?sort=date&order={% if sort_by == 'date' and sort_order == 'desc' %}asc{% else %}desc{% endif %}{% if filter_type != 'all' %}&filter={{ filter_type }}{% endif %}{% if search %}&search={{ search }}{% endif %}{% if cluster_id is not none %}&cluster_id={{ cluster_id }}{% endif %}{% if tag_ids_str %}&tag_ids={{ tag_ids_str }}{% endif %}" class="sort-link {% if sort_by == 'date' %}active{% endif %}">
         Date {% if sort_by == 'date' %}{{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}
       </a>
       <span style="color: var(--border-subtle);">|</span>
-      <a href="?sort=name&order={% if sort_by == 'name' and sort_order == 'asc' %}desc{% else %}asc{% endif %}{% if filter_type != 'all' %}&filter={{ filter_type }}{% endif %}{% if search %}&search={{ search }}{% endif %}{% if cluster_id is not none %}&cluster_id={{ cluster_id }}{% endif %}{% if active_tag %}&tag_id={{ active_tag.id }}{% endif %}" class="sort-link {% if sort_by == 'name' %}active{% endif %}">
+      <a href="?sort=name&order={% if sort_by == 'name' and sort_order == 'asc' %}desc{% else %}asc{% endif %}{% if filter_type != 'all' %}&filter={{ filter_type }}{% endif %}{% if search %}&search={{ search }}{% endif %}{% if cluster_id is not none %}&cluster_id={{ cluster_id }}{% endif %}{% if tag_ids_str %}&tag_ids={{ tag_ids_str }}{% endif %}" class="sort-link {% if sort_by == 'name' %}active{% endif %}">
         Name {% if sort_by == 'name' %}{{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}
       </a>
       <span style="color: var(--border-subtle);">|</span>
-      <a href="?sort=size&order={% if sort_by == 'size' and sort_order == 'desc' %}asc{% else %}desc{% endif %}{% if filter_type != 'all' %}&filter={{ filter_type }}{% endif %}{% if search %}&search={{ search }}{% endif %}{% if cluster_id is not none %}&cluster_id={{ cluster_id }}{% endif %}{% if active_tag %}&tag_id={{ active_tag.id }}{% endif %}" class="sort-link {% if sort_by == 'size' %}active{% endif %}">
+      <a href="?sort=size&order={% if sort_by == 'size' and sort_order == 'desc' %}asc{% else %}desc{% endif %}{% if filter_type != 'all' %}&filter={{ filter_type }}{% endif %}{% if search %}&search={{ search }}{% endif %}{% if cluster_id is not none %}&cluster_id={{ cluster_id }}{% endif %}{% if tag_ids_str %}&tag_ids={{ tag_ids_str }}{% endif %}" class="sort-link {% if sort_by == 'size' %}active{% endif %}">
         Size {% if sort_by == 'size' %}{{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}
       </a>
       <span style="color: var(--border-subtle);">|</span>
-      <a href="?sort=faces&order={% if sort_by == 'faces' and sort_order == 'desc' %}asc{% else %}desc{% endif %}{% if filter_type != 'all' %}&filter={{ filter_type }}{% endif %}{% if search %}&search={{ search }}{% endif %}{% if cluster_id is not none %}&cluster_id={{ cluster_id }}{% endif %}{% if active_tag %}&tag_id={{ active_tag.id }}{% endif %}" class="sort-link {% if sort_by == 'faces' %}active{% endif %}">
+      <a href="?sort=faces&order={% if sort_by == 'faces' and sort_order == 'desc' %}asc{% else %}desc{% endif %}{% if filter_type != 'all' %}&filter={{ filter_type }}{% endif %}{% if search %}&search={{ search }}{% endif %}{% if cluster_id is not none %}&cluster_id={{ cluster_id }}{% endif %}{% if tag_ids_str %}&tag_ids={{ tag_ids_str }}{% endif %}" class="sort-link {% if sort_by == 'faces' %}active{% endif %}">
         Faces {% if sort_by == 'faces' %}{{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}
+      </a>
+      <span style="color: var(--border-subtle);">|</span>
+      <a
+        href="#"
+        onclick="event.preventDefault();const u=new URL(window.location.href);u.searchParams.set('sort','shuffle');u.searchParams.delete('page');u.searchParams.set('seed',Math.floor(Math.random()*1000000000));window.location.href=u.toString();"
+        class="sort-link {% if sort_by == 'shuffle' %}active{% endif %}"
+        title="Shuffle the media order"
+      >
+        Shuffle{% if sort_by == 'shuffle' %} 🔀{% endif %}
       </a>
     </div>
   </div>
@@ -159,7 +205,7 @@
       <div 
         id="infinite-scroll-sentinel-2"
         class="infinite-scroll-sentinel"
-        hx-get="/?page=2&infinite=1{% if filter_type != 'all' %}&filter={{ filter_type }}{% endif %}{% if search %}&search={{ search }}{% endif %}{% if cluster_id is not none %}&cluster_id={{ cluster_id }}{% endif %}{% if active_tag %}&tag_id={{ active_tag.id }}{% endif %}&sort={{ sort_by }}&order={{ sort_order }}"
+        hx-get="/?page=2&infinite=1{% if filter_type != 'all' %}&filter={{ filter_type }}{% endif %}{% if search %}&search={{ search }}{% endif %}{% if cluster_id is not none %}&cluster_id={{ cluster_id }}{% endif %}{% if tag_ids_str %}&tag_ids={{ tag_ids_str }}{% endif %}&sort={{ sort_by }}&order={{ sort_order }}{% if seed is not none and sort_by == 'shuffle' %}&seed={{ seed }}{% endif %}"
         hx-trigger="revealed"
         hx-swap="outerHTML"
       >
@@ -181,8 +227,8 @@
     <p>
       {% if filter_type == 'favorites' %}
         You haven't marked any photos as favorites yet. Click the heart icon on any photo to favorite it.
-      {% elif active_tag %}
-        No media has been tagged with <strong>#{{ active_tag.name }}</strong> yet. Open any photo and add this tag.
+      {% elif active_tags %}
+        No media matches all of <strong>{{ active_tags_str }}</strong> yet. Open any photo and add these tags.
       {% elif search %}
         No photos or people matched your search criteria.
       {% else %}

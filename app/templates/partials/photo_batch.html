@@ -6,7 +6,7 @@
   <div 
     id="infinite-scroll-sentinel-{{ page + 1 }}"
     class="infinite-scroll-sentinel"
-    hx-get="{{ target_url }}{% if '?' in target_url %}&{% else %}?{% endif %}page={{ page + 1 }}&infinite=1{% if filter_type and filter_type != 'all' %}&filter={{ filter_type }}{% endif %}{% if search %}&search={{ search }}{% endif %}{% if person_id %}&person_id={{ person_id }}{% endif %}{% if cluster_id is not none %}&cluster_id={{ cluster_id }}{% endif %}{% if folder_path %}&folder_path={{ folder_path }}{% endif %}{% if similar_to %}&similar_to={{ similar_to }}{% endif %}{% if tag_id %}&tag_id={{ tag_id }}{% endif %}{% if sort_by %}&sort={{ sort_by }}{% endif %}{% if sort_order %}&order={{ sort_order }}{% endif %}"
+    hx-get="{{ target_url }}{% if '?' in target_url %}&{% else %}?{% endif %}page={{ page + 1 }}&infinite=1{% if filter_type and filter_type != 'all' %}&filter={{ filter_type }}{% endif %}{% if search %}&search={{ search }}{% endif %}{% if person_id %}&person_id={{ person_id }}{% endif %}{% if cluster_id is not none %}&cluster_id={{ cluster_id }}{% endif %}{% if folder_path %}&folder_path={{ folder_path }}{% endif %}{% if similar_to %}&similar_to={{ similar_to }}{% endif %}{% if tag_ids %}&tag_ids={{ tag_ids }}{% endif %}{% if sort_by %}&sort={{ sort_by }}{% endif %}{% if sort_order %}&order={{ sort_order }}{% endif %}{% if seed is not none and sort_by == 'shuffle' %}&seed={{ seed }}{% endif %}"
     hx-trigger="revealed"
     hx-swap="outerHTML"
   >

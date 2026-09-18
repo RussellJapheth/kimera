@@ -132,7 +132,107 @@ def test_tag_filters_images(temp_db: Database):
     assert adj["total_count"] == 2
 
 
-def test_image_tags_cascade_on_delete_and_clone(temp_db: Database):
+def test_multi_tag_and_filtering(temp_db: Database):
+    img1 = temp_db.insert_image("/path/to/a.jpg")
+    img2 = temp_db.insert_image("/path/to/b.jpg")
+    img3 = temp_db.insert_image("/path/to/c.jpg")
+    temp_db.add_tags_to_image(img1, ["Trip", "Europe"])
+    temp_db.add_tags_to_image(img2, ["Trip"])
+    temp_db.add_tags_to_image(img3, ["Europe"])
+
+    trip_tag = None
+    europe_tag = None
+    for t in temp_db.get_all_tags():
+        if t["name"].lower() == "trip":
+            trip_tag = t
+        elif t["name"].lower() == "europe":
+            europe_tag = t
+    assert trip_tag is not None and europe_tag is not None
+
+    # Single tag AND keeps backward-compat single-arg behaviour
+    single = temp_db.get_images(tag_ids=[trip_tag["id"]])
+    assert single["total"] == 2
+
+    # AND semantics: both tags must match
+    both = temp_db.get_images(tag_ids=[trip_tag["id"], europe_tag["id"]])
+    assert both["total"] == 1
+    assert both["images"][0]["id"] == img1
+
+
+def test_shuffle_seeded_order_is_stable(temp_db: Database):
+    ids = []
+    for i in range(12):
+        ids.append(temp_db.insert_image(f"/path/to/img{i}.jpg"))
+
+    seed = 42
+    first = temp_db.get_images(sort_by="shuffle", seed=seed, limit=60)
+    second = temp_db.get_images(sort_by="shuffle", seed=seed, limit=60)
+    assert first["total"] == 12
+    assert [i["id"] for i in first["images"]] == [i["id"] for i in second["images"]]
+
+    # Without a seed, ordering is not the guaranteed shuffle (falls back to date sort)
+    plain = temp_db.get_images(sort_by="shuffle", limit=60)
+    assert plain["total"] == 12
+
+    # The shuffle is a permutation of all ids (no dupes / no gaps)
+    shuffled_ids = [i["id"] for i in first["images"]]
+    assert sorted(shuffled_ids) == sorted(ids)
+
+    # Adjacent navigation honours the same seeded shuffle order
+    adj = temp_db.get_adjacent_image_ids(image_id=shuffled_ids[3], sort_by="shuffle", seed=seed)
+    assert adj["total_count"] == 12
+    assert adj["current_index"] == 4
+
+
+def test_shuffle_different_seed_different_order(temp_db: Database):
+    for i in range(12):
+        temp_db.insert_image(f"/path/to/s{i}.jpg")
+    order_a = [i["id"] for i in temp_db.get_images(sort_by="shuffle", seed=1, limit=60)["images"]]
+    order_b = [i["id"] for i in temp_db.get_images(sort_by="shuffle", seed=2, limit=60)["images"]]
+    assert order_a != order_b
+
+
+def test_media_type_filter_video_photo(temp_db: Database):
+    temp_db.insert_image("/path/to/pic.jpg")
+    temp_db.insert_image("/path/to/vid.mp4", duration=10.0)
+    temp_db.insert_image("/path/to/clip.MOV", duration=5.0)
+
+    videos = temp_db.get_images(media_type="video")
+    assert videos["total"] == 2
+    photos = temp_db.get_images(media_type="photo")
+    assert photos["total"] == 1
+
+
+def test_watch_events_and_recommendations(temp_db: Database):
+    pic = temp_db.insert_image("/path/to/pic.jpg")
+    vid1 = temp_db.insert_image("/path/to/vid1.mp4", duration=10.0)
+    vid2 = temp_db.insert_image("/path/to/vid2.mp4", duration=20.0)
+    temp_db.add_tags_to_image(vid2, ["Favorite"])
+    temp_db.toggle_favorite(vid2)
+
+    temp_db.record_watch_event(vid1, "view")
+    temp_db.record_watch_event(vid1, "view")
+    temp_db.record_watch_event(vid2, "view")
+
+    recs = temp_db.get_recommended_videos(limit=10)
+    assert any(r["id"] == vid2 for r in recs)  # favourite + watched ranks high
+    assert all(r["id"] != pic for r in recs)  # photos never recommended
+
+    # Trashed videos must not appear in recommendations
+    temp_db.move_to_trash([vid1])
+    recs2 = temp_db.get_recommended_videos(limit=10)
+    assert all(r["id"] != vid1 for r in recs2)
+
+
+def test_trash_and_restore_db_layer(temp_db: Database):
+    img = temp_db.insert_image("/path/to/trashme.jpg")
+    temp_db.move_to_trash([img])
+    assert img in temp_db.get_trashed_image_ids()
+    assert temp_db.get_summary_stats()["images_scanned"] == 0
+
+    temp_db.restore_from_trash([img])
+    assert img not in temp_db.get_trashed_image_ids()
+    assert temp_db.get_summary_stats()["images_scanned"] == 1
     img_id = temp_db.insert_image("/path/to/cascade.jpg")
     temp_db.add_tags_to_image(img_id, ["Keep"])
 

@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+
+{% block title %}Trash - Kimera Gallery{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: -4px;">
+        <path d="M3 6h18"/>
+        <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/>
+        <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>
+        <line x1="10" y1="11" x2="10" y2="17"/>
+        <line x1="14" y1="11" x2="14" y2="17"/>
+      </svg>
+      Trash
+    </h1>
+    <p class="page-subtitle">
+      {{ total }} item{{ 's' if total != 1 else '' }} in trash. Item{{ 's are' if total != 1 else ' is' }} restored or permanently deleted below.
+    </p>
+  </div>
+
+  <div style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
+    {% if total %}
+      <button
+        class="btn"
+        style="padding: 0.4rem 0.75rem; font-size: 0.8125rem; display: inline-flex; align-items: center; gap: 0.3rem;"
+        onclick="fetch('/api/files/restore',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(r=>{if(r.ok)location.reload();else alert('Failed to restore');});"
+      >Restore All</button>
+      <button
+        class="btn"
+        style="padding: 0.4rem 0.75rem; font-size: 0.8125rem; color: #f87171; border-color: rgba(239, 68, 68, 0.3); display: inline-flex; align-items: center; gap: 0.3rem;"
+        onclick="if(!confirm('Permanently delete all {{ total }} item(s) from disk?'))return;fetch('/api/files/empty-trash',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(r=>{if(r.ok)location.reload();else alert('Failed to empty trash');});"
+      >Empty Trash</button>
+    {% endif %}
+  </div>
+</div>
+
+{% if total %}
+<div class="photo-grid">
+  {% for image in images %}
+  <div class="photo-card is-video" id="trash-card-{{ image.id }}" style="position: relative;">
+    <img src="/api/photos/{{ image.id }}/thumbnail" alt="{{ image.filename }}" loading="lazy" style="width:100%;object-fit:cover;aspect-ratio:1;">
+    {% if image.is_video %}
+    <div class="video-play-indicator">
+      <div class="video-play-icon">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+          <polygon points="6 4 20 12 6 20 6 4"/>
+        </svg>
+      </div>
+    </div>
+    {% endif %}
+    <div class="photo-info-bar" style="display:flex;flex-direction:column;gap:0.15rem;padding:0.45rem 0.6rem;font-size:0.7rem;">
+      <span class="card-info" style="color:#f1f5f9;">{{ image.filename }}</span>
+      {% if image.deleted_at %}
+      <span style="color: var(--text-dim);">Trashed: {{ image.deleted_at }}</span>
+      {% endif %}
+    </div>
+    <div class="trash-actions" style="display:flex;gap:0.3rem;padding:0.35rem 0.6rem;padding-top:0;flex-wrap:wrap;">
+      <button
+        class="btn"
+        style="padding:0.2rem 0.55rem;font-size:0.7rem;border-radius:9999px;display:inline-flex;align-items:center;gap:0.3rem;"
+        onclick="fetch('/api/files/restore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({image_ids:[{{ image.id }}]})}).then(r=>{if(r.ok){document.getElementById('trash-card-{{ image.id }}').remove();}else{alert('Failed to restore');}});"
+      >↺ Restore</button>
+      <button
+        class="btn"
+        style="padding:0.2rem 0.55rem;font-size:0.7rem;border-radius:9999px;color:#f87171;border-color:rgba(239,68,68,0.3);display:inline-flex;align-items:center;gap:0.3rem;"
+        onclick="if(!confirm('Permanently delete {{ image.filename }} from disk?'))return;fetch('/api/files/empty-trash',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({image_ids:[{{ image.id }}]})}).then(r=>{if(r.ok){document.getElementById('trash-card-{{ image.id }}').remove();}else{alert('Failed to delete');}});"
+      >Delete Forever</button>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty-state">
+  <div class="empty-icon" style="opacity: 0.5;">
+    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+      <path d="M3 6h18"/>
+      <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/>
+      <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>
+    </svg>
+  </div>
+  <h3 class="empty-title">Trash is empty</h3>
+  <p class="empty-subtitle">Files you move to trash live here until you restore them or empty the trash permanently.</p>
+  <a href="/" class="btn btn-primary" style="margin-top: 0.5rem;">Back to Gallery</a>
+</div>
+{% endif %}
+{% endblock %}

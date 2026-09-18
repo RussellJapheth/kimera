@@ -14,6 +14,7 @@ runs generated from the length of a validated id list -- never user-supplied val
 from __future__ import annotations
 
 import logging
+import random
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -168,6 +169,8 @@ class Database:
                 cursor.execute("ALTER TABLE images ADD COLUMN content_hash TEXT DEFAULT ''")
             if "duration" not in image_cols:
                 cursor.execute("ALTER TABLE images ADD COLUMN duration REAL DEFAULT 0.0")
+            if "deleted_at" not in image_cols:
+                cursor.execute("ALTER TABLE images ADD COLUMN deleted_at TEXT DEFAULT NULL")
 
             cursor.execute("PRAGMA table_info(faces)")
             face_cols = {col["name"] for col in cursor.fetchall()}
@@ -189,7 +192,22 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_image_tags_tag ON image_tags(tag_id);
                 CREATE INDEX IF NOT EXISTS idx_tags_name ON tags(name);
                 CREATE INDEX IF NOT EXISTS idx_media_embeddings_image ON media_embeddings(image_id);
+
+                CREATE TABLE IF NOT EXISTS watch_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    image_id INTEGER NOT NULL,
+                    event_type TEXT NOT NULL DEFAULT 'view',
+                    watched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_watch_events_image ON watch_events(image_id);
+                CREATE INDEX IF NOT EXISTS idx_watch_events_time ON watch_events(watched_at);
             """)
+
+            cursor.execute("PRAGMA table_info(images)")
+            post_migration_image_cols = {col["name"] for col in cursor.fetchall()}
+            if "deleted_at" in post_migration_image_cols:
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_images_deleted_at ON images(deleted_at)")
 
             # 4. Migrate and collapse any legacy video keyframe entries (e.g. "...#t=1.23s") to single clean video files
             cursor.execute("SELECT id, file_path, width, height, is_favorite FROM images WHERE file_path LIKE '%#t=%'")
@@ -280,14 +298,17 @@ class Database:
         """Return file paths of all indexed media."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT file_path FROM images")
+            cursor.execute("SELECT file_path FROM images WHERE deleted_at IS NULL")
             return [r["file_path"] for r in cursor.fetchall()]
 
     def get_all_images_file_meta_map(self) -> dict[str, dict[str, Any]]:
         """Retrieve a dictionary mapping file_path -> file_meta for all indexed files."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT id, file_path, file_size, mtime, content_hash, width, height, duration FROM images")
+            cursor.execute(
+                "SELECT id, file_path, file_size, mtime, content_hash, width, height, duration "
+                "FROM images WHERE deleted_at IS NULL"
+            )
             rows = cursor.fetchall()
             return {str(row["file_path"]): dict(row) for row in rows}
 
@@ -295,7 +316,10 @@ class Database:
         """Return id, file_path, file_size, mtime, content_hash for every indexed file."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT id, file_path, file_size, mtime, content_hash FROM images ORDER BY id ASC")
+            cursor.execute(
+                "SELECT id, file_path, file_size, mtime, content_hash "
+                "FROM images WHERE deleted_at IS NULL ORDER BY id ASC"
+            )
             return [dict(r) for r in cursor.fetchall()]
 
     def get_duplicate_groups(self) -> dict[str, Any]:
@@ -553,23 +577,28 @@ class Database:
         folder_path: str | None = None,
         folder_direct_only: bool = False,
         search: str | None = None,
-        sort_by: str = "date",  # 'date', 'name', 'faces', 'size'
+        sort_by: str = "date",  # 'date', 'name', 'faces', 'size', 'shuffle'
         sort_order: str = "desc",  # 'desc', 'asc'
         page: int = 1,
         limit: int = 60,
         tag_id: int | None = None,
+        tag_ids: list[int] | None = None,
         exclude_duplicates: bool = False,
+        seed: int | None = None,
+        media_type: str | None = None,  # 'photo', 'video', or None for all
     ) -> dict[str, Any]:
         """Query images with filtering, search, sorting, folder filtering, and pagination."""
         offset = max(0, (page - 1) * limit)
         params: list[Any] = []
         where_clauses: list[str] = []
 
+        where_clauses.append("i.deleted_at IS NULL")
+
         if exclude_duplicates:
             where_clauses.append(
                 "(i.content_hash = '' OR i.id = ("
                 "SELECT MIN(mi.id) FROM images mi "
-                "WHERE mi.content_hash = i.content_hash AND mi.content_hash != ''))"
+                "WHERE mi.content_hash = i.content_hash AND mi.content_hash != '' AND mi.deleted_at IS NULL))"
             )
 
         if filter_type == "favorites":
@@ -582,9 +611,20 @@ class Database:
             where_clauses.append("i.id IN (SELECT image_id FROM faces WHERE cluster_id = ?)")
             params.append(cluster_id)
 
-        if tag_id is not None:
-            where_clauses.append("i.id IN (SELECT image_id FROM image_tags WHERE tag_id = ?)")
-            params.append(tag_id)
+        selected_tag_ids = list(tag_ids) if tag_ids else ([tag_id] if tag_id is not None else [])
+        if selected_tag_ids:
+            for tid in selected_tag_ids:
+                where_clauses.append("i.id IN (SELECT image_id FROM image_tags WHERE tag_id = ?)")
+                params.append(tid)
+
+        if media_type == "video":
+            ext_like = " OR ".join("LOWER(i.file_path) LIKE ?" for _ in sorted(VIDEO_EXTENSIONS))
+            where_clauses.append(f"({ext_like})")
+            params.extend(f"%{e}" for e in sorted(VIDEO_EXTENSIONS))
+        elif media_type == "photo":
+            ext_not = " AND ".join("LOWER(i.file_path) NOT LIKE ?" for _ in sorted(VIDEO_EXTENSIONS))
+            where_clauses.append(f"({ext_not})")
+            params.extend(f"%{e}" for e in sorted(VIDEO_EXTENSIONS))
 
         if folder_path:
             norm_folder = str(Path(folder_path).resolve())
@@ -624,6 +664,12 @@ class Database:
             order_sql = f"ORDER BY face_count {order_dir}, i.id {order_dir}"
         elif sort_by == "size":
             order_sql = f"ORDER BY i.file_size {order_dir}, i.id {order_dir}"
+        elif sort_by == "shuffle" and seed is not None:
+            rng = random.Random(int(seed))  # noqa: S311 - stable shuffle order, not crypto
+            mod = 2147483647
+            mult = rng.randrange(2, mod) | 1  # odd, coprime with prime mod
+            add = rng.randrange(0, mod)
+            order_sql = f"ORDER BY ((i.id % {mod}) * {mult} + {add}) % {mod} ASC, i.id ASC"
         else:  # default date
             order_sql = f"ORDER BY i.scanned_at {order_dir}, i.id {order_dir}"
 
@@ -694,9 +740,11 @@ class Database:
         sort_by: str = "date",
         sort_order: str = "desc",
         tag_id: int | None = None,
+        tag_ids: list[int] | None = None,
         similar_to: int | None = None,
         threshold: float | None = None,
         exclude_duplicates: bool = False,
+        seed: int | None = None,
     ) -> dict[str, int | None]:
         """Get previous and next image IDs for modal navigation."""
         if similar_to is not None:
@@ -733,12 +781,13 @@ class Database:
 
         params: list[Any] = []
         where_clauses: list[str] = []
+        where_clauses.append("i.deleted_at IS NULL")
 
         if exclude_duplicates:
             where_clauses.append(
                 "(i.content_hash = '' OR i.id = ("
                 "SELECT MIN(mi.id) FROM images mi "
-                "WHERE mi.content_hash = i.content_hash AND mi.content_hash != ''))"
+                "WHERE mi.content_hash = i.content_hash AND mi.content_hash != '' AND mi.deleted_at IS NULL))"
             )
 
         if filter_type == "favorites":
@@ -749,9 +798,11 @@ class Database:
         elif cluster_id is not None:
             where_clauses.append("i.id IN (SELECT image_id FROM faces WHERE cluster_id = ?)")
             params.append(cluster_id)
-        if tag_id is not None:
-            where_clauses.append("i.id IN (SELECT image_id FROM image_tags WHERE tag_id = ?)")
-            params.append(tag_id)
+        selected_tag_ids = list(tag_ids) if tag_ids else ([tag_id] if tag_id is not None else [])
+        if selected_tag_ids:
+            for tid in selected_tag_ids:
+                where_clauses.append("i.id IN (SELECT image_id FROM image_tags WHERE tag_id = ?)")
+                params.append(tid)
         if folder_path:
             norm_folder = str(Path(folder_path).resolve())
             if folder_direct_only:
@@ -788,6 +839,12 @@ class Database:
             order_sql = f"ORDER BY face_count {order_dir}, i.id {order_dir}"
         elif sort_by == "size":
             order_sql = f"ORDER BY i.file_size {order_dir}, i.id {order_dir}"
+        elif sort_by == "shuffle" and seed is not None:
+            rng = random.Random(int(seed))  # noqa: S311 - stable shuffle order, not crypto
+            mod = 2147483647
+            mult = rng.randrange(2, mod) | 1  # odd, coprime with prime mod
+            add = rng.randrange(0, mod)
+            order_sql = f"ORDER BY ((i.id % {mod}) * {mult} + {add}) % {mod} ASC, i.id ASC"
         else:
             order_sql = f"ORDER BY i.scanned_at {order_dir}, i.id {order_dir}"
 
@@ -824,7 +881,7 @@ class Database:
         """Extract hierarchical folder structure and subdirectories with photo counts."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT id, file_path FROM images ORDER BY file_path ASC")
+            cursor.execute("SELECT id, file_path FROM images WHERE deleted_at IS NULL ORDER BY file_path ASC")
             rows = cursor.fetchall()
 
         if not rows:
@@ -1255,10 +1312,10 @@ class Database:
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
-            cursor.execute("SELECT COUNT(*) as cnt FROM images")
+            cursor.execute("SELECT COUNT(*) as cnt FROM images WHERE deleted_at IS NULL")
             images_scanned = cursor.fetchone()["cnt"]
 
-            cursor.execute("SELECT COUNT(*) as cnt FROM images WHERE is_favorite = 1")
+            cursor.execute("SELECT COUNT(*) as cnt FROM images WHERE is_favorite = 1 AND deleted_at IS NULL")
             favorites_count = cursor.fetchone()["cnt"]
 
             cursor.execute("SELECT COUNT(*) as cnt FROM faces")
@@ -1681,6 +1738,196 @@ class Database:
             cursor.execute(f"DELETE FROM images WHERE id IN ({placeholders})", [int(i) for i in image_ids])  # noqa: S608
             return cursor.rowcount
 
+    def move_to_trash(self, image_ids: list[int]) -> int:
+        """Soft-delete image records so they appear in the trash bin instead of the gallery."""
+        if not image_ids:
+            return 0
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            placeholders = ",".join("?" for _ in image_ids)
+            cursor.execute(
+                f"UPDATE images SET deleted_at = CURRENT_TIMESTAMP WHERE id IN ({placeholders})",  # noqa: S608
+                [int(i) for i in image_ids],
+            )
+            return cursor.rowcount
+
+    def restore_from_trash(self, image_ids: list[int]) -> int:
+        """Restore soft-deleted image records back into the gallery."""
+        if not image_ids:
+            return 0
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            placeholders = ",".join("?" for _ in image_ids)
+            cursor.execute(
+                f"UPDATE images SET deleted_at = NULL WHERE id IN ({placeholders})",  # noqa: S608
+                [int(i) for i in image_ids],
+            )
+            return cursor.rowcount
+
+    def get_trashed_image_ids(self) -> list[int]:
+        """Return ids of all soft-deleted image records."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM images WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC, id DESC")
+            return [int(r["id"]) for r in cursor.fetchall()]
+
+    def get_trashed_images(self) -> list[dict[str, Any]]:
+        """Return enriched metadata for all soft-deleted image records."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT i.id, i.file_path, i.is_favorite, i.duration, i.deleted_at,
+                       COUNT(DISTINCT COALESCE(f.person_id, f.cluster_id, f.id)) as face_count
+                FROM images i
+                LEFT JOIN faces f ON i.id = f.image_id
+                WHERE i.deleted_at IS NOT NULL
+                GROUP BY i.id
+                ORDER BY i.deleted_at DESC, i.id DESC
+                """
+            )
+            rows = cursor.fetchall()
+
+        images = []
+        for r in rows:
+            p = Path(r["file_path"])
+            dur = float(r["duration"] or 0.0)
+            images.append(
+                {
+                    "id": r["id"],
+                    "file_path": r["file_path"],
+                    "filename": p.name,
+                    "is_video": p.suffix.lower() in VIDEO_EXTENSIONS,
+                    "is_favorite": bool(r["is_favorite"]),
+                    "duration": dur,
+                    "formatted_duration": format_duration(dur),
+                    "face_count": r["face_count"],
+                    "deleted_at": r["deleted_at"],
+                }
+            )
+        return images
+
+    def record_watch_event(self, image_id: int, event_type: str = "view") -> None:
+        """Record a media view/watch event for recommendation signals."""
+        with self._get_connection() as conn:
+            conn.execute(
+                "INSERT INTO watch_events (image_id, event_type, watched_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+                (int(image_id), event_type),
+            )
+
+    def get_recommended_videos(self, limit: int = 12, exclude_duplicates: bool = False) -> list[dict[str, Any]]:
+        """
+        Recommend videos using learned watch behaviour: recency, time-of-day
+        affinity, favourites, and CLIP content similarity to recently watched
+        videos. Falls back to newest videos when there is no watch history.
+        """
+        from datetime import datetime
+
+        now = datetime.now()
+        current_hour = now.hour
+
+        candidate_data = self.get_images(
+            filter_type="all",
+            sort_by="date",
+            sort_order="desc",
+            page=1,
+            limit=2000,
+            exclude_duplicates=exclude_duplicates,
+            media_type="video",
+        )
+        candidates = candidate_data["images"]
+        if not candidates:
+            return []
+
+        # Recent watch events for videos (90-day window)
+        recent_watches: dict[int, list[dict[str, Any]]] = {}
+        ext_like = " OR ".join(
+            f"i.file_path LIKE '%{e}'" for e in sorted(VIDEO_EXTENSIONS)
+        )
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT w.image_id, w.watched_at
+                FROM watch_events w
+                JOIN images i ON i.id = w.image_id AND i.deleted_at IS NULL
+                WHERE w.watched_at >= datetime('now', '-90 days')
+                  AND ({ext_like})
+                ORDER BY w.watched_at DESC
+                """  # noqa: S608
+            )
+            for row in cursor.fetchall():
+                recent_watches.setdefault(int(row["image_id"]), []).append({"watched_at": str(row["watched_at"])})
+
+        # Content centroid of recently watched videos (recency-weighted CLIP embeddings)
+        content_centroid: np.ndarray | None = None
+        cen_weight_sum = 0.0
+        all_embs = self.get_all_media_embeddings()
+        recent_ids = [wid for wid in recent_watches if wid in all_embs][:40]
+        for days_ago, wid in enumerate(recent_ids):
+            weight = 0.5 ** (days_ago / 14.0)
+            if content_centroid is None:
+                content_centroid = np.zeros_like(all_embs[wid], dtype=np.float64)
+            content_centroid += all_embs[wid].astype(np.float64) * weight
+            cen_weight_sum += weight
+        if content_centroid is not None and cen_weight_sum > 0:
+            content_centroid /= cen_weight_sum
+
+        def _parse_hour(watched_at: str) -> int:
+            try:
+                return int(watched_at.split(" ", maxsplit=1)[1].split(":", maxsplit=1)[0]) if " " in watched_at else 0
+            except (ValueError, IndexError):
+                return 0
+
+        scored: list[dict[str, Any]] = []
+        for img in candidates:
+            vid = img["id"]
+            watches = recent_watches.get(vid, [])
+            fav_boost = 1.2 if img.get("is_favorite") else 0.0
+
+            # Recency + frequency of watching this video
+            watch_boost = 0.0
+            for watch in watches[:10]:
+                wt = watch["watched_at"]
+                days_ago = 0
+                try:
+                    if " " in wt:
+                        parsed = datetime.strptime(wt[:19], "%Y-%m-%d %H:%M:%S")
+                        days_ago = (now - parsed).days
+                    else:
+                        days_ago = 0
+                except ValueError:
+                    days_ago = 0
+                watch_boost += 0.7 * (0.5 ** (days_ago / 20.0))
+            watch_boost += min(0.5, len(watches) * 0.05)
+
+            # Time-of-day affinity: how often this video was watched near the current hour
+            time_boost = 0.0
+            for wt in watches[:20]:
+                hour = _parse_hour(wt["watched_at"])
+                diff = abs(hour - current_hour)
+                if diff <= 2:
+                    time_boost += 0.25
+
+            # Content affinity vs recently watched videos
+            content_score = 0.0
+            emb = all_embs.get(vid)
+            if content_centroid is not None and emb is not None:
+                cd = content_centroid
+                norm_c = np.linalg.norm(cd) + 1e-9
+                norm_e = np.linalg.norm(emb) + 1e-9
+                content_score = float(np.dot(cd / norm_c, emb / norm_e))
+                content_score = max(0.0, min(1.0, (content_score + 1.0) / 2.0))
+
+            score = fav_boost * 2.0 + watch_boost * 3.0 + time_boost * 2.0 + content_score * 4.0
+            scored.append({"image": img, "score": score})
+
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        ranked = [s["image"] for s in scored[:limit]]
+        for img in ranked:
+            img.setdefault("face_count", 0)
+        return ranked
+
     def clone_image_record(self, source_image_id: int, new_path: str) -> int | None:
         """Clone an image and all its face detections/embeddings for a copied file."""
         resolved = str(Path(new_path).resolve())
@@ -1920,7 +2167,12 @@ class Database:
         result: dict[int, np.ndarray] = {}
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT image_id, embedding FROM media_embeddings")
+            cursor.execute(
+                """
+                SELECT me.image_id, me.embedding FROM media_embeddings me
+                JOIN images i ON i.id = me.image_id AND i.deleted_at IS NULL
+                """
+            )
             for row in cursor.fetchall():
                 result[row["image_id"]] = self.deserialize_embedding(row["embedding"])
         return result

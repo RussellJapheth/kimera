@@ -36,7 +36,7 @@ def test_env(tmp_path):
     }
 
 
-def test_delete_single_and_bulk_files(test_env):
+def test_delete_single_and_bulk_files_trashes_but_keeps_on_disk(test_env):
     db = test_env["db"]
     client = test_env["client"]
     pics_dir = test_env["pics_dir"]
@@ -53,24 +53,99 @@ def test_delete_single_and_bulk_files(test_env):
     id2 = db.insert_image(str(f2), width=100, height=100, file_size=6)
     id3 = db.insert_image(str(f3), width=100, height=100, file_size=6)
 
-    # Delete single file via JSON
+    # Delete single file via JSON -> soft delete (trash), file stays on disk
     resp = client.post("/api/files/delete", json={"image_ids": [id1]})
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "success"
     assert data["deleted_count"] == 1
-    assert not f1.exists()
-    assert db.get_image(id1) is None
+    assert f1.exists()
+    assert id1 in db.get_trashed_image_ids()
 
     # Delete multiple files via Form data
     resp2 = client.post("/api/files/delete", data={"image_ids": f"{id2},{id3}"})
     assert resp2.status_code == 200
     data2 = resp2.json()
     assert data2["deleted_count"] == 2
+    assert f2.exists()
+    assert f3.exists()
+    assert id2 in db.get_trashed_image_ids()
+    assert id3 in db.get_trashed_image_ids()
+
+
+def test_restore_from_trash(test_env):
+    db = test_env["db"]
+    client = test_env["client"]
+    pics_dir = test_env["pics_dir"]
+
+    f1 = pics_dir / "img1.jpg"
+    f2 = pics_dir / "img2.jpg"
+    f1.write_text("photo1")
+    f2.write_text("photo2")
+
+    id1 = db.insert_image(str(f1), width=100, height=100, file_size=6)
+    id2 = db.insert_image(str(f2), width=100, height=100, file_size=6)
+
+    client.post("/api/files/delete", json={"image_ids": [id1, id2]})
+    assert set(db.get_trashed_image_ids()) == {id1, id2}
+
+    # Restore single
+    resp = client.post("/api/files/restore", json={"image_ids": [id1]})
+    assert resp.status_code == 200
+    assert resp.json()["restored_count"] == 1
+    assert id1 not in db.get_trashed_image_ids()
+    assert id2 in db.get_trashed_image_ids()
+
+    # Trashed items are hidden from gallery listings
+    resp3 = client.post("/api/files/restore", json={"image_ids": [id2]})
+    assert resp3.status_code == 200
+    assert db.get_trashed_image_ids() == []
+
+
+def test_empty_trash_permanently_deletes_from_disk(test_env):
+    db = test_env["db"]
+    client = test_env["client"]
+    pics_dir = test_env["pics_dir"]
+
+    f1 = pics_dir / "img1.jpg"
+    f2 = pics_dir / "img2.jpg"
+    f1.write_text("photo1")
+    f2.write_text("photo2")
+
+    id1 = db.insert_image(str(f1), width=100, height=100, file_size=6)
+    id2 = db.insert_image(str(f2), width=100, height=100, file_size=6)
+
+    client.post("/api/files/delete", json={"image_ids": [id1, id2]})
+
+    # Hard-delete a single trashed item
+    resp = client.post("/api/files/empty-trash", json={"image_ids": [id1]})
+    assert resp.status_code == 200
+    assert resp.json()["deleted_count"] == 1
+    assert not f1.exists()
+    assert id1 not in db.get_trashed_image_ids()
+    assert db.get_image(id1) is None
+
+    # Empty the rest
+    resp2 = client.post("/api/files/empty-trash", json={})
+    assert resp2.status_code == 200
+    assert resp2.json()["deleted_count"] == 1
     assert not f2.exists()
-    assert not f3.exists()
-    assert db.get_image(id2) is None
-    assert db.get_image(id3) is None
+    assert db.get_trashed_image_ids() == []
+
+
+def test_trash_page_renders(test_env):
+    db = test_env["db"]
+    client = test_env["client"]
+    pics_dir = test_env["pics_dir"]
+
+    f1 = pics_dir / "img1.jpg"
+    f1.write_text("photo1")
+    id1 = db.insert_image(str(f1), width=100, height=100, file_size=6)
+    client.post("/api/files/delete", json={"image_ids": [id1]})
+
+    resp = client.get("/trash")
+    assert resp.status_code == 200
+    assert "img1.jpg" in resp.text
 
 
 def test_rename_file(test_env):

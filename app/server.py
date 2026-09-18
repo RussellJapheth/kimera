@@ -13,13 +13,14 @@ from __future__ import annotations
 import contextlib
 import logging
 import mimetypes
+import random
 import shutil
 import threading
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Form, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -395,6 +396,11 @@ def _parse_image_ids(raw_ids: Any) -> list[int]:
     return []
 
 
+def _parse_tag_ids(raw_ids: Any) -> list[int]:
+    """Extract list of integer tag IDs from a comma-separated string, list, or int."""
+    return _parse_image_ids(raw_ids)
+
+
 def _get_unique_destination_path(target_dir: Path, filename: str) -> Path:
     """Ensure unique destination path by appending _1, _2, etc. if candidate exists."""
     dest = target_dir / filename
@@ -453,6 +459,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: str | None = None) 
         person_id: int | None = Query(None),
         cluster_id: int | None = Query(None),
         tag_id: int | None = Query(None),
+        tag_ids: str | None = Query(None),
         folder_path: str | None = Query(None),
         similar_to: int | None = Query(None),
         threshold: float | None = Query(None),
@@ -460,8 +467,25 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: str | None = None) 
         sort_order: str = Query("desc", alias="order"),
         page: int = Query(1, ge=1),
         infinite: int = Query(0),
+        seed: int | None = Query(None),
     ):
         exclude_duplicates = db.get_setting("exclude_duplicates") == "1"
+
+        active_tag_ids = _parse_tag_ids(tag_ids) if tag_ids else ([tag_id] if tag_id is not None else [])
+        active_tags = [db.get_tag(tid) for tid in active_tag_ids if db.get_tag(tid) is not None]
+        active_tag_ids = [t["id"] for t in active_tags]
+        tag_ids_str = ",".join(str(tid) for tid in active_tag_ids)
+        active_tags_str = " + ".join(f"#{t['name']}" for t in active_tags)
+
+        # Shuffle needs a stable seed in the URL so pagination and modal
+        # navigation stay consistent. Redirect once to attach it.
+        if sort_by == "shuffle" and seed is None:
+            seed = random.randint(0, 2**31 - 1)  # noqa: S311 - shuffle order seed, not crypto
+            params = dict(request.query_params)
+            params["seed"] = str(seed)
+            from urllib.parse import urlencode
+
+            return RedirectResponse(f"/?{urlencode(params)}", status_code=302)
 
         similar_to_image = None
         if similar_to is not None:
@@ -493,13 +517,31 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: str | None = None) 
                 sort_order=sort_order,
                 page=page,
                 limit=48,
-                tag_id=tag_id,
+                tag_ids=active_tag_ids,
                 exclude_duplicates=exclude_duplicates,
+                seed=seed,
             )
 
         active_tab = "favorites" if filter == "favorites" else "photos"
         all_tags = db.get_all_tags()
-        active_tag = db.get_tag(tag_id) if tag_id is not None else None
+
+        # Recommendations only on the unfiltered library overview
+        recommendations = []
+        if (
+            filter == "all"
+            and not search
+            and not active_tag_ids
+            and person_id is None
+            and cluster_id is None
+            and folder_path is None
+            and similar_to is None
+        ):
+            try:
+                recommendations = db.get_recommended_videos(limit=12, exclude_duplicates=exclude_duplicates)
+            # Recommendations are optional; never block the gallery on them.
+            except Exception:
+                logger.debug("recommendations failed", exc_info=True)
+                recommendations = []
 
         # If cluster_id is specified, fetch cluster info for top rename banner
         cluster_info = None
@@ -536,7 +578,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: str | None = None) 
                     "similar_to_image": similar_to_image,
                     "sort_by": sort_by,
                     "sort_order": sort_order,
-                    "tag_id": tag_id,
+                    "tag_ids": tag_ids_str,
+                    "seed": seed,
                     "target_url": "/",
                 },
             )
@@ -562,8 +605,13 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: str | None = None) 
                 "sort_by": sort_by,
                 "sort_order": sort_order,
                 "active_page": active_tab,
-                "active_tag": active_tag,
+                "active_tags": active_tags,
+                "active_tag_ids": active_tag_ids,
+                "active_tags_str": active_tags_str,
+                "tag_ids_str": tag_ids_str,
                 "all_tags": all_tags,
+                "seed": seed,
+                "recommendations": recommendations,
             },
         )
 
@@ -696,6 +744,32 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: str | None = None) 
                 "active_page": "people",
             },
         )
+
+    @app.get("/partials/recommendations", response_class=HTMLResponse)
+    async def recommendations_partial(request: Request):
+        exclude_duplicates = db.get_setting("exclude_duplicates") == "1"
+        try:
+            recommendations = db.get_recommended_videos(limit=12, exclude_duplicates=exclude_duplicates)
+        # Recommendations are optional; never block the gallery on them.
+        except Exception:
+            logger.debug("recommendations failed", exc_info=True)
+            recommendations = []
+        return templates.TemplateResponse(
+            request=request,
+            name="partials/recommendations.html",
+            context={"recommendations": recommendations},
+        )
+
+    @app.get("/api/recommendations")
+    async def recommendations_api(limit: int = Query(12, ge=1, le=50)):
+        exclude_duplicates = db.get_setting("exclude_duplicates") == "1"
+        try:
+            recommendations = db.get_recommended_videos(limit=limit, exclude_duplicates=exclude_duplicates)
+        # Recommendations are optional; never block the gallery on them.
+        except Exception:
+            logger.debug("recommendations failed", exc_info=True)
+            recommendations = []
+        return JSONResponse({"recommendations": [{"id": r["id"], "filename": r["filename"]} for r in recommendations]})
 
     @app.get("/settings", response_class=HTMLResponse)
     async def settings_view(request: Request):
@@ -1121,6 +1195,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: str | None = None) 
         sort_by: str = "date",
         sort_order: str = "desc",
         tag_id: int | None = None,
+        tag_ids: list[int] | None = None,
+        seed: int | None = None,
     ) -> HTMLResponse:
         img_meta = db.get_image(image_id)
         if not img_meta:
@@ -1128,6 +1204,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: str | None = None) 
         img_p = Path(img_meta["file_path"])
         img_meta["filename"] = img_p.name
         img_meta["parent_folder"] = str(img_p.parent)
+
+        active_tag_ids = list(tag_ids) if tag_ids else ([tag_id] if tag_id is not None else [])
 
         adj = db.get_adjacent_image_ids(
             image_id=image_id,
@@ -1141,8 +1219,9 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: str | None = None) 
             search=search,
             sort_by=sort_by,
             sort_order=sort_order,
-            tag_id=tag_id,
+            tag_ids=active_tag_ids,
             exclude_duplicates=db.get_setting("exclude_duplicates") == "1",
+            seed=seed,
         )
 
         try:
@@ -1171,6 +1250,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: str | None = None) 
                 "sort_by": sort_by,
                 "sort_order": sort_order,
                 "tag_id": tag_id,
+                "seed": seed,
                 "suggested_tags": suggested_tags,
                 "modal_ctx": {
                     "filter_type": filter_type,
@@ -1182,7 +1262,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: str | None = None) 
                     "threshold": threshold,
                     "sort_by": sort_by,
                     "sort_order": sort_order,
-                    "ctx_tag_id": tag_id,
+                    "ctx_tag_ids": ",".join(str(tid) for tid in active_tag_ids),
+                    "seed": seed,
                 },
             },
         )
@@ -1203,6 +1284,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: str | None = None) 
         sort_by: str = Query("date", alias="sort"),
         sort_order: str = Query("desc", alias="order"),
         tag_id: int | None = Query(None),
+        tag_ids: str | None = Query(None),
+        seed: int | None = Query(None),
     ):
         effective_folder = folder_path or path
         is_direct = bool(direct_only == 1 or path or ("/folders" in request.headers.get("referer", "")))
@@ -1220,6 +1303,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: str | None = None) 
             sort_by=sort_by,
             sort_order=sort_order,
             tag_id=tag_id,
+            tag_ids=_parse_tag_ids(tag_ids) if tag_ids else None,
+            seed=seed,
         )
 
     @app.post("/api/photos/{image_id}/favorite", response_class=HTMLResponse)
@@ -1274,6 +1359,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: str | None = None) 
         sort_by: str = Query("date"),
         sort_order: str = Query("desc"),
         ctx_tag_id: int | None = Query(None),
+        ctx_tag_ids: str | None = Query(None),
     ):
         img = db.get_image(image_id)
         if not img:
@@ -1297,7 +1383,7 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: str | None = None) 
                         "folder_path": folder_path,
                         "sort_by": sort_by,
                         "sort_order": sort_order,
-                        "ctx_tag_id": ctx_tag_id,
+                        "ctx_tag_ids": (str(ctx_tag_id) if ctx_tag_id is not None else ""),
                     }.items()
                     if v is not None
                 },
@@ -1319,6 +1405,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: str | None = None) 
         sort_by: str = Form("date"),
         sort_order: str = Form("desc"),
         ctx_tag_id: int | None = Form(None),
+        ctx_tag_ids: str | None = Form(None),
+        seed: int | None = Form(None),
     ):
         tag_names = [t.strip() for t in tags.split(",") if t.strip()]
         db.add_tags_to_image(image_id, tag_names)
@@ -1335,6 +1423,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: str | None = None) 
             sort_by=sort_by,
             sort_order=sort_order,
             tag_id=ctx_tag_id,
+            tag_ids=_parse_tag_ids(ctx_tag_ids) if ctx_tag_ids else None,
+            seed=seed,
         )
 
     @app.post("/api/photos/{image_id}/tags/{tag_id}/remove", response_class=HTMLResponse)
@@ -1352,6 +1442,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: str | None = None) 
         sort_by: str = Form("date"),
         sort_order: str = Form("desc"),
         ctx_tag_id: int | None = Form(None),
+        ctx_tag_ids: str | None = Form(None),
+        seed: int | None = Form(None),
     ):
         db.remove_tag_from_image(image_id, tag_id)
         return _render_photo_modal_response(
@@ -1367,6 +1459,8 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: str | None = None) 
             sort_by=sort_by,
             sort_order=sort_order,
             tag_id=ctx_tag_id,
+            tag_ids=_parse_tag_ids(ctx_tag_ids) if ctx_tag_ids else None,
+            seed=seed,
         )
 
     @app.get("/api/faces/{face_id}/crop")
@@ -1848,13 +1942,42 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: str | None = None) 
 
     @app.post("/api/files/delete")
     async def delete_files_endpoint(request: Request):
+        """Move files to trash instead of deleting from disk immediately."""
         payload = await _extract_request_payload(request)
         raw_ids = _parse_image_ids(payload.get("image_ids") or payload.get("image_id"))
 
         if not raw_ids:
             raise HTTPException(status_code=400, detail="No image IDs provided")
 
-        deleted_count = 0
+        trashed_count = db.move_to_trash(raw_ids)
+        return JSONResponse({"status": "success", "deleted_count": trashed_count, "deleted_ids": raw_ids})
+
+    @app.post("/api/files/restore")
+    async def restore_files_endpoint(request: Request):
+        """Restore soft-deleted files back into the gallery."""
+        payload = await _extract_request_payload(request)
+        raw_ids = _parse_image_ids(payload.get("image_ids") or payload.get("image_id"))
+
+        if not raw_ids:
+            raise HTTPException(status_code=400, detail="No image IDs provided")
+
+        restored_count = db.restore_from_trash(raw_ids)
+        return JSONResponse({"status": "success", "restored_count": restored_count, "restored_ids": raw_ids})
+
+    @app.post("/api/files/empty-trash")
+    async def empty_trash_endpoint(request: Request):
+        """Permanently delete trashed files from disk and database."""
+        payload = await _extract_request_payload(request)
+        raw_ids = _parse_image_ids(payload.get("image_ids") or payload.get("image_id"))
+        empty_all = not raw_ids
+
+        if empty_all:
+            raw_ids = db.get_trashed_image_ids()
+
+        if not raw_ids:
+            return JSONResponse({"status": "success", "deleted_count": 0, "deleted_ids": []})
+
+        # Permanently remove files from disk
         for img_id in raw_ids:
             img = db.get_image(img_id)
             if img and img.get("file_path"):
@@ -1863,10 +1986,27 @@ def create_app(db_path: str = "face_clusters.db", cache_dir: str | None = None) 
                     with contextlib.suppress(Exception):
                         fpath.unlink(missing_ok=True)
                 cache.invalidate_media_cache(img["file_path"])
-                deleted_count += 1
 
         db.delete_image_records(raw_ids)
-        return JSONResponse({"status": "success", "deleted_count": deleted_count, "deleted_ids": raw_ids})
+        return JSONResponse({"status": "success", "deleted_count": len(raw_ids), "deleted_ids": raw_ids})
+
+    @app.get("/trash", response_class=HTMLResponse)
+    async def trash_view(request: Request):
+        trashed = db.get_trashed_images()
+        return templates.TemplateResponse(
+            request=request,
+            name="trash.html",
+            context={
+                "images": trashed,
+                "total": len(trashed),
+                "active_page": "trash",
+            },
+        )
+
+    @app.post("/api/photos/{image_id}/watched")
+    async def record_watched(image_id: int):
+        db.record_watch_event(image_id, event_type="view")
+        return JSONResponse({"status": "success"})
 
     @app.post("/api/files/rename")
     async def rename_file_endpoint(request: Request):

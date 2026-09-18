@@ -41,6 +41,12 @@
           handleLoaded() {
             this.isLoading = false;
             this.hasError = false;
+          },
+          watchRecorded: false,
+          recordWatch() {
+            if (this.watchRecorded) return;
+            this.watchRecorded = true;
+            fetch('/api/photos/{{ image.id }}/watched', { method: 'POST' }).catch(() => {});
           }
         }"
       >
@@ -82,7 +88,7 @@
           @loadeddata="handleLoaded()"
           @canplay="handleLoaded()"
           @waiting="isLoading = true"
-          @playing="isLoading = false"
+          @playing="isLoading = false; recordWatch()"
           src="/api/photos/{{ image.id }}/raw"
         >
           Your browser does not support video playback.
@@ -213,7 +219,7 @@
           this.renaming = false;
         },
         async deleteSingle() {
-          if (!confirm('Are you sure you want to permanently delete {{ image.filename }} from disk?')) return;
+          if (!confirm('Move {{ image.filename }} to trash?')) return;
           try {
             const resp = await fetch('/api/files/delete', {
               method: 'POST',
@@ -232,7 +238,7 @@
                 window.location.reload();
               {% endif %}
             } else {
-              alert('Failed to delete file');
+              alert('Failed to move file to trash');
             }
           } catch(e) {
             alert('Error: ' + e.message);
@@ -280,7 +286,7 @@
             Download
           </a>
 
-          <button type="button" class="btn" style="padding: 0.3rem 0.6rem; font-size: 0.75rem; color: #f87171; border-color: rgba(239, 68, 68, 0.3); display: inline-flex; align-items: center; gap: 0.3rem;" @click="deleteSingle()" title="Delete file from disk">
+          <button type="button" class="btn" style="padding: 0.3rem 0.6rem; font-size: 0.75rem; color: #f87171; border-color: rgba(239, 68, 68, 0.3); display: inline-flex; align-items: center; gap: 0.3rem;" @click="deleteSingle()" title="Move to trash (restorable)">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M3 6h18"/>
               <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/>
@@ -411,7 +417,7 @@
                   hx-post="/api/photos/{{ image.id }}/tags"
                   hx-target="#modal-container"
                   hx-swap="innerHTML"
-                  hx-vals='{"tags": "{{ stag.name }}", "filter_type": "{{ modal_ctx.filter_type if modal_ctx else "all" }}", "search": "{{ modal_ctx.search if modal_ctx and modal_ctx.search else "" }}", "person_id": "{{ modal_ctx.person_id if modal_ctx and modal_ctx.person_id else "" }}", "cluster_id": "{{ modal_ctx.cluster_id if modal_ctx and modal_ctx.cluster_id is not none else "" }}", "folder_path": "{{ modal_ctx.folder_path if modal_ctx and modal_ctx.folder_path else "" }}", "similar_to": "{{ modal_ctx.similar_to if modal_ctx and modal_ctx.similar_to else "" }}", "threshold": "{{ modal_ctx.threshold if modal_ctx and modal_ctx.threshold else "" }}", "sort_by": "{{ modal_ctx.sort_by if modal_ctx else "date" }}", "sort_order": "{{ modal_ctx.sort_order if modal_ctx else "desc" }}", "ctx_tag_id": "{{ modal_ctx.ctx_tag_id if modal_ctx and modal_ctx.ctx_tag_id else "" }}"}'
+                  hx-vals='{"tags": "{{ stag.name }}", "filter_type": "{{ modal_ctx.filter_type if modal_ctx else "all" }}", "search": "{{ modal_ctx.search if modal_ctx and modal_ctx.search else "" }}", "person_id": "{{ modal_ctx.person_id if modal_ctx and modal_ctx.person_id else "" }}", "cluster_id": "{{ modal_ctx.cluster_id if modal_ctx and modal_ctx.cluster_id is not none else "" }}", "folder_path": "{{ modal_ctx.folder_path if modal_ctx and modal_ctx.folder_path else "" }}", "similar_to": "{{ modal_ctx.similar_to if modal_ctx and modal_ctx.similar_to else "" }}", "threshold": "{{ modal_ctx.threshold if modal_ctx and modal_ctx.threshold else "" }}", "sort_by": "{{ modal_ctx.sort_by if modal_ctx else "date" }}", "sort_order": "{{ modal_ctx.sort_order if modal_ctx else "desc" }}", "ctx_tag_ids": "{{ modal_ctx.ctx_tag_ids if modal_ctx and modal_ctx.ctx_tag_ids else "" }}", "seed": "{{ modal_ctx.seed if modal_ctx and modal_ctx.seed is not none else "" }}"}'
                 >
                   <span style="color: #a5b4fc; font-weight: 600;">+ {{ stag.name }}</span>
                   <span style="font-size: 0.65rem; color: #94a3b8; background: rgba(255,255,255,0.06); padding: 0.05rem 0.3rem; border-radius: 4px;">{{ stag.confidence_pct }}%</span>
